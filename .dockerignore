@@ -1,0 +1,17 @@
+# Сборочный контекст — только нужное для `mvn package -pl coordination-server -am`
+.git
+.cursor
+**/target/
+**/.classpath
+**/.project
+**/.settings/
+.idea
+.vscode
+*.iml
+.venv
+__pycache__
+*.pyc
+*.md
+docs/
+scripts/
+agent-transcripts/

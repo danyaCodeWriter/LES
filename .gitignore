@@ -1,0 +1,18 @@
+target/
+coordination-server/target/
+coordination-client/target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+
+# Python doc export (md_to_word.py)
+.venv/
+
+# Cursor agent chat exports (local only)
+agent-transcripts/
+

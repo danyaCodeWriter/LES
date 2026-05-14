@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-coordination-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: etcd-coordination-service
+  template:
+    metadata:
+      labels:
+        app: etcd-coordination-service
+    spec:
+      containers:
+        - name: app
+          image: etcd-coordination-service:local
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          env:
+            - name: COORDINATION_ETCD_ENDPOINTS_0
+              value: "http://etcd:2379"
+            - name: COORDINATION_ETCD_ROOTPREFIX
+              value: "/coord/v1/tenants"
+            - name: COORDINATION_APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: coordination-api
+                  key: apiKey
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+

@@ -1,0 +1,350 @@
+syntax = "proto3";
+
+package coordination.v1;
+
+option java_multiple_files = true;
+option java_package = "com.acme.coordination.v1";
+option java_outer_classname = "CoordinationProto";
+
+// --- Common ---
+
+message StringMap {
+  map<string, string> entries = 1;
+}
+
+message CoordinatorPayload {
+  string coordinator_id = 1;
+  string instance_id = 2;
+  StringMap metadata = 3;
+  int64 issued_at_unix_millis = 4;
+  int64 fence_epoch = 5;
+  int64 lease_id = 6;
+  int64 mod_revision = 7;
+  string token = 8;
+}
+
+message Empty {}
+
+// --- Active region (сервер подставляет текущий active region; region_id в запросе не передаётся) ---
+
+message AcquireCoordinatorRequest {
+  string tenant_id = 1;
+  reserved 2; // legacy region_id
+  string coordinator_id = 3;
+  string instance_id = 4;
+  // etcd lease TTL seconds; must be 10..300 inclusive (same as REST/OpenAPI).
+  int32 ttl_seconds = 5;
+  StringMap metadata = 6;
+}
+
+message AcquireCoordinatorResponse {
+  bool acquired = 1;
+  int64 lease_id = 2;
+  int64 revision = 3;
+  int64 fence_epoch = 4;
+  CoordinatorPayload current_holder = 5;
+  string token = 6;
+}
+
+message GetCoordinatorRequest {
+  string tenant_id = 1;
+  reserved 2;
+  // Same secret as RenewCoordinator (Bearer / X-Coordinator-Token on REST).
+  string coordinator_read_token = 3;
+}
+
+message GetCoordinatorResponse {
+  CoordinatorPayload coordinator = 1;
+}
+
+message RenewCoordinatorRequest {
+  string tenant_id = 1;
+  reserved 2;
+  reserved 3; // legacy instance_id (renew now uses token like workers)
+  string token = 4;
+}
+
+message RenewCoordinatorResponse {
+  bool renewed = 1;
+}
+
+// --- Global coordinator (etcd .../global/leader) ---
+
+message AcquireGlobalCoordinatorRequest {
+  string tenant_id = 1;
+  string coordinator_id = 2;
+  string instance_id = 3;
+  // etcd lease TTL seconds; must be 10..300 inclusive.
+  int32 ttl_seconds = 4;
+  StringMap metadata = 5;
+}
+
+message GetGlobalCoordinatorRequest {
+  string tenant_id = 1;
+  string coordinator_read_token = 2;
+}
+
+message RenewGlobalCoordinatorRequest {
+  string tenant_id = 1;
+  reserved 2; // legacy instance_id
+  string token = 3;
+}
+
+// --- Active region workers ---
+
+message RegisterWorkerRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string worker_id = 3;
+  string instance_id = 4;
+  // etcd lease TTL seconds; must be 10..300 inclusive.
+  int32 ttl_seconds = 5;
+  StringMap metadata = 6;
+}
+
+message RegisterWorkerResponse {
+  bool created = 1;
+  string token = 2;
+  int64 lease_id = 3;
+}
+
+message WorkerHeartbeatRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string worker_id = 3;
+  string token = 4;
+}
+
+message WorkerHeartbeatResponse {
+  bool ok = 1;
+}
+
+message ListWorkersRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string coordinator_read_token = 3;
+}
+
+message WorkerPayload {
+  string worker_id = 1;
+  string instance_id = 2;
+  string token = 3;
+  StringMap metadata = 4;
+  int64 issued_at_unix_millis = 5;
+  int64 lease_id = 6;
+  int64 mod_revision = 7;
+}
+
+message ListWorkersResponse {
+  repeated WorkerPayload workers = 1;
+}
+
+// --- Global workers ---
+
+message RegisterGlobalWorkerRequest {
+  string tenant_id = 1;
+  string worker_id = 2;
+  string instance_id = 3;
+  // etcd lease TTL seconds; must be 10..300 inclusive.
+  int32 ttl_seconds = 4;
+  StringMap metadata = 5;
+}
+
+message WorkerHeartbeatGlobalRequest {
+  string tenant_id = 1;
+  string worker_id = 2;
+  string token = 3;
+}
+
+message ListGlobalWorkersRequest {
+  string tenant_id = 1;
+  string coordinator_read_token = 2;
+}
+
+// --- Active region jobs ---
+
+message AcquireJobRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string job_id = 3;
+  // Regional coordinatorId (current leader) or registered workerId in this active region.
+  string holder = 4;
+  // etcd lease TTL seconds; must be 10..300 inclusive.
+  int32 ttl_seconds = 5;
+  StringMap metadata = 6;
+  // Token from coordinator acquire or worker register (same possession model as renew).
+  string participant_token = 7;
+}
+
+message JobPayload {
+  string job_id = 1;
+  string holder = 2;
+  StringMap metadata = 3;
+  int64 issued_at_unix_millis = 4;
+  int64 lease_id = 5;
+  int64 mod_revision = 6;
+  // Omitted in older etcd JSON; returned on acquire and GET when present.
+  string token = 7;
+}
+
+message AcquireJobResponse {
+  bool acquired = 1;
+  int64 lease_id = 2;
+  int64 revision = 3;
+  JobPayload current_holder = 4;
+  // Populated when acquired=true (same secret required for RenewJob/ReleaseJob).
+  string token = 5;
+}
+
+message ReleaseJobRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string job_id = 3;
+  // Deprecated: use token for possession; still accepted for legacy job records without token in etcd.
+  string holder = 4;
+  string token = 5;
+}
+
+message ReleaseJobResponse {
+  bool released = 1;
+}
+
+message RenewJobRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string job_id = 3;
+  string holder = 4;
+  string token = 5;
+}
+
+message RenewJobResponse {
+  bool renewed = 1;
+}
+
+message GetJobRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string job_id = 3;
+  string coordinator_read_token = 4;
+  // Optional: register token of the worker that holds this job (same as POST .../workers/register). If set with
+  // empty coordinator_read_token, GET is authorized as the job holder without coordinator read token.
+  string worker_register_token = 5;
+}
+
+message GetJobResponse {
+  JobPayload job = 1;
+}
+
+// --- Global jobs ---
+
+message AcquireGlobalJobRequest {
+  string tenant_id = 1;
+  string job_id = 2;
+  // Global coordinatorId (current global leader) or registered global workerId.
+  string holder = 3;
+  // etcd lease TTL seconds; must be 10..300 inclusive.
+  int32 ttl_seconds = 4;
+  StringMap metadata = 5;
+  string participant_token = 6;
+}
+
+message ReleaseGlobalJobRequest {
+  string tenant_id = 1;
+  string job_id = 2;
+  string holder = 3;
+  string token = 4;
+}
+
+message RenewGlobalJobRequest {
+  string tenant_id = 1;
+  string job_id = 2;
+  string holder = 3;
+  string token = 4;
+}
+
+message GetGlobalJobRequest {
+  string tenant_id = 1;
+  string job_id = 2;
+  string coordinator_read_token = 3;
+  string worker_register_token = 4;
+}
+
+// --- Ring (pure) ---
+
+message ComputeRangesRequest {
+  repeated string worker_ids = 1;
+  // If 0 or unset, server uses default (128) virtual nodes per worker_id.
+  int32 virtual_nodes = 2;
+  // If true, response includes `points` (every vnode on the ring). Default false to keep payloads small.
+  bool with_points = 3;
+}
+
+message Range {
+  uint64 start = 1;
+  uint64 end = 2;
+}
+
+message RingPoint {
+  uint64 pos = 1;
+  string worker_id = 2;
+}
+
+message ComputeRangesResponse {
+  map<string, Ranges> ranges_by_worker = 1;
+  repeated RingPoint points = 2;
+}
+
+message Ranges {
+  repeated Range ranges = 1;
+}
+
+// --- Tenant-wide coordination key watch (regional + global prefixes; idempotency keys excluded from stream scope) ---
+
+message TenantKeyWatchEvent {
+  string event_type = 1;
+  string key = 2;
+  int64 mod_revision = 3;
+  int64 lease_id = 4;
+  string value_json = 5;
+}
+
+message WatchTenantKeysRequest {
+  string tenant_id = 1;
+  // Global coordinator read token OR coordination.sre.stream-listen-token (same as HTTP GET .../stream/keys).
+  string access_credential = 2;
+}
+
+// --- Service ---
+
+service Coordination {
+  rpc AcquireCoordinator(AcquireCoordinatorRequest) returns (AcquireCoordinatorResponse);
+  rpc GetCoordinator(GetCoordinatorRequest) returns (GetCoordinatorResponse);
+  rpc RenewCoordinator(RenewCoordinatorRequest) returns (RenewCoordinatorResponse);
+
+  rpc AcquireGlobalCoordinator(AcquireGlobalCoordinatorRequest) returns (AcquireCoordinatorResponse);
+  rpc GetGlobalCoordinator(GetGlobalCoordinatorRequest) returns (GetCoordinatorResponse);
+  rpc RenewGlobalCoordinator(RenewGlobalCoordinatorRequest) returns (RenewCoordinatorResponse);
+
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+
+  rpc RegisterGlobalWorker(RegisterGlobalWorkerRequest) returns (RegisterWorkerResponse);
+  rpc WorkerHeartbeatGlobal(WorkerHeartbeatGlobalRequest) returns (WorkerHeartbeatResponse);
+  rpc ListGlobalWorkers(ListGlobalWorkersRequest) returns (ListWorkersResponse);
+
+  rpc AcquireJob(AcquireJobRequest) returns (AcquireJobResponse);
+  rpc ReleaseJob(ReleaseJobRequest) returns (ReleaseJobResponse);
+  rpc RenewJob(RenewJobRequest) returns (RenewJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+
+  rpc AcquireGlobalJob(AcquireGlobalJobRequest) returns (AcquireJobResponse);
+  rpc ReleaseGlobalJob(ReleaseGlobalJobRequest) returns (ReleaseJobResponse);
+  rpc RenewGlobalJob(RenewGlobalJobRequest) returns (RenewJobResponse);
+  rpc GetGlobalJob(GetGlobalJobRequest) returns (GetJobResponse);
+
+  rpc ComputeRanges(ComputeRangesRequest) returns (ComputeRangesResponse);
+
+  /** Server-streaming watch: all coordination keys under tenant {@code regions/} + {@code global/}. */
+  rpc WatchTenantKeys(WatchTenantKeysRequest) returns (stream TenantKeyWatchEvent);
+}

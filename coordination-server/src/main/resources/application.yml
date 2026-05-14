@@ -1,0 +1,56 @@
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+coordination:
+  # ACTIVE = принимать regional + short-path (active region) мутации. STANDBY = stand-in ЦОД: только global и read/SSE active-region.
+  # SWITCH = regional мутации закрыты для клиентов (как STANDBY), но участие в REGION_DRAIN + ускоренное удаление старых ключей при drain (см. README).
+  # Роль поллится раз в coordination.active-region.poll-interval-ms: role-file (если задан) → role-env-var → role (config).
+  deployment:
+    role: ACTIVE
+    role-env-var: COORDINATION_DEPLOYMENT_ROLE
+    role-file: ""
+  etcd:
+    endpoints:
+      - "http://127.0.0.1:2379"
+    # Root prefix for all tenants
+    rootPrefix: "/coord/v1/tenants"
+    dialTimeout: 3s
+    requestTimeout: 3s
+  apiKey: "" # if set, require header x-api-key
+  idempotency:
+    enabled: true
+    ttl-seconds: 86400
+    max-header-length: 128
+    max-body-bytes: 262144
+  # Active region: polled in this order — file (if set) → env → static value → "default".
+  # K8s: mount ConfigMap/Secret as file and set coordination.active-region.file-path for hot switchover without pod env mutation.
+  active-region:
+    env-var: COORDINATION_ACTIVE_REGION
+    value: ""
+    file-path: ""
+    poll-interval-ms: 5000
+  # SRE: один статический Bearer (Authorization / X-Coordinator-Token) только для SSE .../stream/workers|jobs
+  # и .../global/stream/workers|jobs — без токена лидера coordinator. Пустая строка — выключено.
+  # В проде переопределите через Secret: COORDINATION_SRE_STREAM_LISTEN_TOKEN (Spring relaxed binding).
+  sre:
+    stream-listen-token: "sre-stream-dev-token"
+  limits:
+    # 0 = без лимита. Подсчёт: ключи под .../tenants/{tenant}/regions/ + .../global/ (idempotency не считается).
+    max-keys-per-tenant: 10000
+
+grpc:
+  server:
+    port: 9090
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
