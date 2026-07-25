@@ -15,6 +15,21 @@ public final class Keyspace {
     return rootPrefix + "/" + sanitizeSegment(tenantId);
   }
 
+  /**
+   * Cluster-wide logical active region (not under a tenant). For {@code rootPrefix}
+   * {@code /coord/v1/tenants} → {@code /coord/v1/cluster/activeRegion}.
+   */
+  public String clusterActiveRegionKey() {
+    String base;
+    if (rootPrefix.endsWith("/tenants")) {
+      base = rootPrefix.substring(0, rootPrefix.length() - "/tenants".length());
+    } else {
+      int slash = rootPrefix.lastIndexOf('/');
+      base = slash > 0 ? rootPrefix.substring(0, slash) : rootPrefix;
+    }
+    return base + "/cluster/activeRegion";
+  }
+
   /** Prefix listing all tenant subtrees, e.g. {@code /coord/v1/tenants/}. */
   public String allTenantsScanPrefix() {
     return rootPrefix + "/";

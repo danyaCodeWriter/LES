@@ -1,8 +1,8 @@
 package com.acme.coordination.service;
 
 import com.acme.coordination.api.error.ParticipantException;
-import com.acme.coordination.config.CoordinationProperties;
 import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.security.SreTokenVerifier;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.http.HttpHeaders;
@@ -13,9 +13,9 @@ import org.springframework.stereotype.Service;
 /**
  * Regional/global GET (and SSE for workers/jobs) require proof of the active coordinator lease: same secret as
  * {@code coordinator/renew} — {@code Authorization: Bearer &lt;token&gt;} or header {@code X-Coordinator-Token}.
- * <p>Опционально для <strong>только</strong> SSE {@code stream/workers} и {@code stream/jobs} (regional и global)
- * настроен {@link CoordinationProperties.Sre#streamListenToken()}: тот же формат заголовков, но значение статическое
- * из конфигурации (для SRE / мониторинга без coordinator acquire).
+ * <p>Опционально для SSE {@code stream/workers|jobs|keys} (regional и global) настроен
+ * {@link com.acme.coordination.config.CoordinationProperties.Sre#streamListenToken()}: тот же формат заголовков,
+ * но значение статическое из конфигурации.
  * <p>GET a <strong>single</strong> job by id is handled by {@link JobLockReadVerificationService} and also accepts the
  * holder worker's register token.
  */
@@ -24,15 +24,13 @@ public class CoordinatorReadVerificationService {
 
   private final CoordinatorService coordinators;
   private final ActiveRegionMonitor activeRegion;
-  private final CoordinationProperties props;
+  private final SreTokenVerifier sre;
 
   public CoordinatorReadVerificationService(
-      CoordinatorService coordinators,
-      ActiveRegionMonitor activeRegion,
-      CoordinationProperties props) {
+      CoordinatorService coordinators, ActiveRegionMonitor activeRegion, SreTokenVerifier sre) {
     this.coordinators = coordinators;
     this.activeRegion = activeRegion;
-    this.props = props;
+    this.sre = sre;
   }
 
   public CompletableFuture<Void> verifyRegional(ServerHttpRequest request, String tenantId) {
@@ -49,7 +47,7 @@ public class CoordinatorReadVerificationService {
    */
   public CompletableFuture<Void> verifyRegionalStream(ServerHttpRequest request, String tenantId) {
     String secret = extractCoordReadSecret(request);
-    if (matchesSreStreamListenToken(secret)) {
+    if (sre.matches(secret)) {
       return CompletableFuture.completedFuture(null);
     }
     return verifyRegional(request, tenantId);
@@ -61,7 +59,7 @@ public class CoordinatorReadVerificationService {
    */
   public CompletableFuture<Void> verifyGlobalStream(ServerHttpRequest request, String tenantId) {
     String secret = extractCoordReadSecret(request);
-    if (matchesSreStreamListenToken(secret)) {
+    if (sre.matches(secret)) {
       return CompletableFuture.completedFuture(null);
     }
     return verifyGlobal(request, tenantId);
@@ -74,7 +72,7 @@ public class CoordinatorReadVerificationService {
    */
   public CompletableFuture<Void> verifyTenantKeysStream(ServerHttpRequest request, String tenantId) {
     String secret = extractCoordReadSecret(request);
-    if (matchesSreStreamListenToken(secret)) {
+    if (sre.matches(secret)) {
       return CompletableFuture.completedFuture(null);
     }
     return verifyGlobal(request, tenantId);
@@ -82,7 +80,7 @@ public class CoordinatorReadVerificationService {
 
   public CompletableFuture<Void> verifyTenantKeysStreamGrpc(String tenantId, String accessCredential) {
     String secret = grpcReadSecret(accessCredential);
-    if (matchesSreStreamListenToken(secret)) {
+    if (sre.matches(secret)) {
       return CompletableFuture.completedFuture(null);
     }
     return verifyGlobalGrpc(tenantId, secret);
@@ -94,11 +92,6 @@ public class CoordinatorReadVerificationService {
 
   public CompletableFuture<Void> verifyGlobalGrpc(String tenantId, String coordinatorReadToken) {
     return verifyAgainstLeader(coordinators.getGlobal(tenantId), coordinatorReadToken);
-  }
-
-  private boolean matchesSreStreamListenToken(String secret) {
-    String t = props.sre().streamListenToken();
-    return t != null && !t.isBlank() && secret != null && secret.equals(t);
   }
 
   private static CompletableFuture<Void> verifyAgainstLeader(

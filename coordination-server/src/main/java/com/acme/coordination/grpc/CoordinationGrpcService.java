@@ -4,10 +4,14 @@ import com.acme.coordination.hash.ConsistentHashService;
 import com.acme.coordination.ring.ConsistentHashRing;
 import com.acme.coordination.model.CoordinatorRecord;
 import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.deployment.DeploymentRegistrationPolicy;
+import com.acme.coordination.region.RegionSwitchDrainPolicy;
 import com.acme.coordination.model.JobRecord;
 import com.acme.coordination.model.WorkerRecord;
 import com.acme.coordination.api.error.ParticipantException;
 import com.acme.coordination.etcd.Keyspace;
+import com.acme.coordination.security.SreTokenVerifier;
+import com.acme.coordination.service.ActiveRegionService;
 import com.acme.coordination.service.CoordinatorReadVerificationService;
 import com.acme.coordination.service.CoordinatorService;
 import com.acme.coordination.service.JobLockReadVerificationService;
@@ -20,10 +24,12 @@ import com.acme.coordination.v1.AcquireGlobalCoordinatorRequest;
 import com.acme.coordination.v1.AcquireGlobalJobRequest;
 import com.acme.coordination.v1.AcquireJobRequest;
 import com.acme.coordination.v1.AcquireJobResponse;
+import com.acme.coordination.v1.ActiveRegionInfo;
 import com.acme.coordination.v1.ComputeRangesRequest;
 import com.acme.coordination.v1.ComputeRangesResponse;
 import com.acme.coordination.v1.CoordinationGrpc;
 import com.acme.coordination.v1.CoordinatorPayload;
+import com.acme.coordination.v1.GetActiveRegionRequest;
 import com.acme.coordination.v1.GetCoordinatorRequest;
 import com.acme.coordination.v1.GetCoordinatorResponse;
 import com.acme.coordination.v1.GetGlobalCoordinatorRequest;
@@ -49,6 +55,7 @@ import com.acme.coordination.v1.RenewCoordinatorResponse;
 import com.acme.coordination.v1.RenewGlobalCoordinatorRequest;
 import com.acme.coordination.v1.RingPoint;
 import com.acme.coordination.v1.Ranges;
+import com.acme.coordination.v1.SetActiveRegionRequest;
 import com.acme.coordination.v1.StringMap;
 import com.acme.coordination.v1.TenantKeyWatchEvent;
 import com.acme.coordination.v1.WatchTenantKeysRequest;
@@ -80,6 +87,10 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   private final JobLockReadVerificationService jobReadAuth;
   private final ConsistentHashService ring;
   private final ActiveRegionMonitor activeRegion;
+  private final ActiveRegionService activeRegionService;
+  private final SreTokenVerifier sre;
+  private final RegionSwitchDrainPolicy drainPolicy;
+  private final DeploymentRegistrationPolicy deployment;
   private final EtcdWatchService watch;
   private final Keyspace keyspace;
 
@@ -92,6 +103,10 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
       JobLockReadVerificationService jobReadAuth,
       ConsistentHashService ring,
       ActiveRegionMonitor activeRegion,
+      ActiveRegionService activeRegionService,
+      SreTokenVerifier sre,
+      RegionSwitchDrainPolicy drainPolicy,
+      DeploymentRegistrationPolicy deployment,
       EtcdWatchService watch,
       Keyspace keyspace
   ) {
@@ -103,6 +118,10 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     this.jobReadAuth = jobReadAuth;
     this.ring = ring;
     this.activeRegion = activeRegion;
+    this.activeRegionService = activeRegionService;
+    this.sre = sre;
+    this.drainPolicy = drainPolicy;
+    this.deployment = deployment;
     this.watch = watch;
     this.keyspace = keyspace;
   }
@@ -601,6 +620,54 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     } catch (Exception e) {
       responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).withCause(e).asRuntimeException());
     }
+  }
+
+  @Override
+  public void getActiveRegion(GetActiveRegionRequest request, StreamObserver<ActiveRegionInfo> responseObserver) {
+    try {
+      responseObserver.onNext(toActiveRegionInfo());
+      responseObserver.onCompleted();
+    } catch (Exception e) {
+      responseObserver.onError(toGrpcError(e));
+    }
+  }
+
+  @Override
+  public void setActiveRegion(SetActiveRegionRequest request, StreamObserver<ActiveRegionInfo> responseObserver) {
+    try {
+      sre.assertSreFromGrpc(request.getAccessCredential());
+    } catch (Exception e) {
+      responseObserver.onError(toGrpcError(e));
+      return;
+    }
+    activeRegionService
+        .set(request.getRegionId(), request.getStatus())
+        .whenComplete(
+            (state, err) -> {
+              if (err != null) {
+                responseObserver.onError(toGrpcError(err));
+                return;
+              }
+              try {
+                activeRegion.tick();
+                responseObserver.onNext(toActiveRegionInfo());
+                responseObserver.onCompleted();
+              } catch (Exception e) {
+                responseObserver.onError(toGrpcError(e));
+              }
+            });
+  }
+
+  private ActiveRegionInfo toActiveRegionInfo() {
+    var s = activeRegion.snapshot();
+    ActiveRegionInfo.Builder b =
+        ActiveRegionInfo.newBuilder()
+            .setRegionId(s.regionId())
+            .setSource(s.source() == null ? "" : s.source())
+            .setStatus(deployment.instanceStatusWire())
+            .setRegionalWritesBlocked(drainPolicy.regionalWritesBlocked());
+    drainPolicy.drainingPreviousRegionId().ifPresent(b::setDrainingPreviousRegion);
+    return b.build();
   }
 
   private static RuntimeException toGrpcError(Throwable err) {

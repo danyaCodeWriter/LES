@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+#
+# Dev/all-in-one: coordination-server + single-node etcd in ONE container.
+#
+#   docker build -f Dockerfile.with-etcd -t coordination-server:with-etcd .
+#   docker run --rm -p 8080:8080 -p 9090:9090 -p 2379:2379 coordination-server:with-etcd
+#
+# Or compose profile:
+#   docker compose --profile with-etcd up -d --build coordination-with-etcd
+#
+# App uses COORDINATION_ETCD_ENDPOINTS_0=http://127.0.0.1:2379 (set by entrypoint).
+
+ARG ETCD_VERSION=v3.5.15
+
+FROM maven:3.9.9-eclipse-temurin-21 AS build
+WORKDIR /build
+
+COPY pom.xml .
+COPY coordination-hash ./coordination-hash
+COPY coordination-server ./coordination-server
+COPY coordination-client ./coordination-client
+COPY proto ./proto
+COPY openapi ./openapi
+
+RUN mvn -B -DskipTests package -pl coordination-server -am
+
+FROM eclipse-temurin:21-jre-jammy AS runtime
+ARG ETCD_VERSION
+ARG TARGETARCH
+
+WORKDIR /app
+
+RUN groupadd --system --gid 1000 coordination \
+  && useradd --system --uid 1000 --gid coordination --home /app --shell /usr/sbin/nologin coordination \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# Official etcd release (amd64 / arm64).
+RUN set -eux; \
+  case "${TARGETARCH}" in \
+    amd64) ETCD_ARCH=amd64 ;; \
+    arm64) ETCD_ARCH=arm64 ;; \
+    *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}.tar.gz" \
+    | tar -xz -C /tmp; \
+  mv "/tmp/etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}/etcd" /usr/local/bin/etcd; \
+  mv "/tmp/etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}/etcdctl" /usr/local/bin/etcdctl; \
+  rm -rf "/tmp/etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}"; \
+  etcd --version; \
+  etcdctl version
+
+COPY --from=build /build/coordination-server/target/coordination-server-*.jar /app/app.jar
+COPY docker/entrypoint-with-etcd.sh /app/entrypoint-with-etcd.sh
+
+RUN mkdir -p /var/lib/etcd \
+  && chown -R coordination:coordination /app /var/lib/etcd \
+  && chmod +x /app/entrypoint-with-etcd.sh
+
+USER coordination:coordination
+
+EXPOSE 8080 9090 2379
+
+ENV COORDINATION_ETCD_ENDPOINTS_0=http://127.0.0.1:2379 \
+    ETCD_DATA_DIR=/var/lib/etcd
+
+ENTRYPOINT ["/app/entrypoint-with-etcd.sh"]

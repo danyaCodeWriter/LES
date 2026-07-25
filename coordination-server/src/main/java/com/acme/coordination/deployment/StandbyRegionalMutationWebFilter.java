@@ -1,6 +1,5 @@
 package com.acme.coordination.deployment;
 
-import java.nio.charset.StandardCharsets;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
@@ -12,7 +11,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 40)
+@Order(Ordered.HIGHEST_PRECEDENCE + 20)
 public class StandbyRegionalMutationWebFilter implements WebFilter {
 
   private final DeploymentRegistrationPolicy policy;
@@ -23,14 +22,16 @@ public class StandbyRegionalMutationWebFilter implements WebFilter {
 
   @Override
   public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
-    String path = DeploymentRegistrationPolicy.normalizePath(exchange.getRequest().getPath().value());
-    if (!policy.shouldBlockRest(path, exchange.getRequest().getMethod())) {
+    var req = exchange.getRequest();
+    if (!policy.shouldBlockRest(req.getPath().value(), req.getMethod())) {
       return chain.filter(exchange);
     }
-    String json = policy.isSwitch() ? DeploymentRegistrationPolicy.switchBodyJson() : DeploymentRegistrationPolicy.standbyBodyJson();
-    byte[] body = json.getBytes(StandardCharsets.UTF_8);
+    String body = policy.isSwitch()
+        ? DeploymentRegistrationPolicy.switchBodyJson()
+        : DeploymentRegistrationPolicy.standbyBodyJson();
     exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
     exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
-    return exchange.getResponse().writeWith(Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
+    var buffer = exchange.getResponse().bufferFactory().wrap(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    return exchange.getResponse().writeWith(Mono.just(buffer));
   }
 }

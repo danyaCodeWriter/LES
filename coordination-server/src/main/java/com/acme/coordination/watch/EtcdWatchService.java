@@ -21,9 +21,17 @@ public class EtcdWatchService {
   }
 
   public Flux<WatchEventDto> watchPrefix(String prefix) {
+    return watchInternal(prefix, WatchOption.newBuilder().isPrefix(true).build());
+  }
+
+  /** Exact-key watch (not prefix). */
+  public Flux<WatchEventDto> watchKey(String key) {
+    return watchInternal(key, WatchOption.newBuilder().build());
+  }
+
+  private Flux<WatchEventDto> watchInternal(String keyOrPrefix, WatchOption opt) {
     return Flux.create(sink -> {
-      WatchOption opt = WatchOption.newBuilder().isPrefix(true).build();
-      Watcher watcher = watch.watch(bs(prefix), opt, resp -> {
+      Watcher watcher = watch.watch(bs(keyOrPrefix), opt, resp -> {
         for (var ev : resp.getEvents()) {
           var kv = ev.getKeyValue();
           String key = kv.getKey().toString(StandardCharsets.UTF_8);

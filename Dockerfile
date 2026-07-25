@@ -10,6 +10,11 @@
 #     -e COORDINATION_ETCD_ENDPOINTS_0=http://host.docker.internal:2379 \
 #     coordination-server:local
 #
+# All-in-one (app + etcd в одном контейнере): см. Dockerfile.with-etcd
+#   docker build -f Dockerfile.with-etcd -t coordination-server:with-etcd .
+#   docker run --rm -p 8080:8080 -p 9090:9090 -p 2379:2379 coordination-server:with-etcd
+#   # или: docker compose --profile with-etcd up -d --build coordination-with-etcd
+#
 FROM maven:3.9.9-eclipse-temurin-21 AS build
 WORKDIR /build
 

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import com.acme.coordination.config.CoordinationProperties;
 import com.acme.coordination.model.CoordinatorRecord;
 import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.security.SreTokenVerifier;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -33,43 +34,48 @@ class CoordinatorReadVerificationServiceSreStreamTest {
 
   private static CoordinationProperties props(String sreToken) {
     return new CoordinationProperties(
-        new CoordinationProperties.Etcd(
-            List.of("http://127.0.0.1:2379"), "/coord", Duration.ofSeconds(1), Duration.ofSeconds(1)),
+        CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord", Duration.ofSeconds(1), Duration.ofSeconds(1)),
         "",
-        new CoordinationProperties.ActiveRegion("E", "", "", 5000L),
+        new CoordinationProperties.ActiveRegion("r1", "ACTIVE", 5000L),
         new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
         new CoordinationProperties.Sre(sreToken == null ? "" : sreToken),
-        new CoordinationProperties.Limits(10_000));
+        new CoordinationProperties.Limits(10_000),
+        null);
+  }
+
+  private static CoordinatorReadVerificationService svc(
+      CoordinatorService coordinators, ActiveRegionMonitor activeRegion, String sreToken) {
+    return new CoordinatorReadVerificationService(coordinators, activeRegion, new SreTokenVerifier(props(sreToken)));
   }
 
   @Test
   void regionalStream_sreTokenDoesNotTouchCoordinatorService() {
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props("sre-secret"));
+    var service = svc(coordinators, activeRegion, "sre-secret");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/stream")
             .header(HttpHeaders.AUTHORIZATION, "Bearer sre-secret")
             .build();
-    assertDoesNotThrow(() -> svc.verifyRegionalStream(req, "t").join());
+    assertDoesNotThrow(() -> service.verifyRegionalStream(req, "t").join());
     verify(coordinators, never()).get(anyString(), anyString());
   }
 
   @Test
   void regionalStream_xCoordinatorTokenAcceptsSre() {
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props("x"));
+    var service = svc(coordinators, activeRegion, "x");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/stream").header("X-Coordinator-Token", "x").build();
-    assertDoesNotThrow(() -> svc.verifyRegionalStream(req, "t").join());
+    assertDoesNotThrow(() -> service.verifyRegionalStream(req, "t").join());
     verify(coordinators, never()).get(anyString(), anyString());
   }
 
   @Test
   void globalStream_sreTokenDoesNotTouchGlobalCoordinator() {
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props("sre-secret"));
+    var service = svc(coordinators, activeRegion, "sre-secret");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/gstream")
             .header(HttpHeaders.AUTHORIZATION, "Bearer sre-secret")
             .build();
-    assertDoesNotThrow(() -> svc.verifyGlobalStream(req, "t").join());
+    assertDoesNotThrow(() -> service.verifyGlobalStream(req, "t").join());
     verify(coordinators, never()).getGlobal(anyString());
   }
 
@@ -77,12 +83,12 @@ class CoordinatorReadVerificationServiceSreStreamTest {
   void regionalStream_wrongSreFallsBackToCoordinatorPath() {
     when(activeRegion.activeRegionId()).thenReturn("r1");
     when(coordinators.get("t", "r1")).thenReturn(CompletableFuture.completedFuture(Optional.empty()));
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props("sre-secret"));
+    var service = svc(coordinators, activeRegion, "sre-secret");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/stream")
             .header(HttpHeaders.AUTHORIZATION, "Bearer not-sre")
             .build();
-    assertThrows(ExecutionException.class, () -> svc.verifyRegionalStream(req, "t").get());
+    assertThrows(ExecutionException.class, () -> service.verifyRegionalStream(req, "t").get());
     verify(coordinators).get("t", "r1");
   }
 
@@ -93,23 +99,23 @@ class CoordinatorReadVerificationServiceSreStreamTest {
         new CoordinatorService.CoordinatorState(
             new CoordinatorRecord("c", "i", "ctok", Map.of(), Instant.now(), 1L), 1L, 2L);
     when(coordinators.get("t", "r1")).thenReturn(CompletableFuture.completedFuture(Optional.of(leader)));
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props(""));
+    var service = svc(coordinators, activeRegion, "");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/stream")
             .header(HttpHeaders.AUTHORIZATION, "Bearer ctok")
             .build();
-    assertDoesNotThrow(() -> svc.verifyRegionalStream(req, "t").join());
+    assertDoesNotThrow(() -> service.verifyRegionalStream(req, "t").join());
   }
 
   @Test
   void regularRegionalGet_doesNotAcceptSreToken() {
     when(activeRegion.activeRegionId()).thenReturn("r1");
     when(coordinators.get("t", "r1")).thenReturn(CompletableFuture.completedFuture(Optional.empty()));
-    var svc = new CoordinatorReadVerificationService(coordinators, activeRegion, props("sre-secret"));
+    var service = svc(coordinators, activeRegion, "sre-secret");
     ServerHttpRequest req =
         MockServerHttpRequest.get("http://localhost/workers")
             .header(HttpHeaders.AUTHORIZATION, "Bearer sre-secret")
             .build();
-    assertThrows(ExecutionException.class, () -> svc.verifyRegional(req, "t").get());
+    assertThrows(ExecutionException.class, () -> service.verifyRegional(req, "t").get());
   }
 }

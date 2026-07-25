@@ -2,7 +2,7 @@
 
 Корень репо: каталог с `pom.xml`. Tenant по умолчанию: **`demo-team`**. Инфраструктура: [`scripts/demo-two-dc.sh`](../scripts/demo-two-dc.sh). Префикс в etcd: **`/coord/v1/tenants`**.
 
-Порты: **2379** etcd, **8099** Etcd UI, **8080** / **9090** ACTIVE, **8081** / **9091** STANDBY. Нужны **curl** и **jq**; для шага gRPC в happy path — **grpcurl** (опционально).
+Порты: **2379** etcd, **8099** Etcd UI, **8090** RSS mock, **8080** / **9090** ACTIVE, **8081** / **9091** STANDBY. Нужны **curl** и **jq**; для шага gRPC в happy path — **grpcurl** (опционально). Инфра: [`docker-compose.yml`](../docker-compose.yml) (`etcd` + `etcdkeeper` + `rss-mock`).
 
 ### GET и токен координатора (что видно в логах)
 
@@ -17,9 +17,10 @@
 | Терминал | Что делать |
 |----------|------------|
 | **T0** | `cd <корень-репо>` → `./scripts/demo-two-dc.sh etcd-start` → `./scripts/demo-two-dc.sh init-file` |
-| **T1** | Из **корня репо**: `./scripts/demo-two-dc.sh run-active` — оставить до конца демо (**Ctrl+C** остановит процесс). Нужен **JDK 21+**; скрипт ставит `coordination-hash` в `~/.m2` и запускает `spring-boot:run` по `coordination-server/pom.xml` (не через корневой `pom.xml` + `-pl`, иначе Maven сначала бьёт в aggregator). |
+| **T0 (RSS)** | Для шага RSS: ещё `./scripts/demo-two-dc.sh rss-start` (или сразу `infra-up`) |
+| **T1** | Из **корня репо**: `./scripts/demo-two-dc.sh run-active` — оставить до конца демо (**Ctrl+C** остановит процесс). Нужен **JDK 21+**; скрипт ставит `coordination-hash` в `~/.m2` и запускает `spring-boot:run` по `coordination-server/pom.xml` (не через корневой `pom.xml` + `-pl`, иначе Maven сначала бьёт в aggregator). Для RSS-демо: **`run-active-rss`**. |
 | **T2** | `./scripts/demo-two-dc.sh run-standby` — так же (второй терминал) |
-| **T3** | Пошаговые сценарии (happy path, workers+KV, bench, job lock, standby — см. ниже) |
+| **T3** | Пошаговые сценарии (happy path, workers+KV, bench, job lock, standby, **RSS** — см. ниже) |
 | **T4** | (опционально) **SSE** workers + jobs параллельно с T3: `scripts/demo-step-sse-workers-jobs.sh` (нужен `COORD_SSE_BEARER`, см. §1d) |
 
 **Вместо T1+T2 в foreground:** `./scripts/demo-two-dc.sh start-active-bg` и `start-standby-bg`, логи `tail -f /tmp/coord-demo-spring-active.log`. Остановка: `./scripts/demo-two-dc.sh stop-apps`.
@@ -120,6 +121,34 @@ export GLOBAL_SSE_BEARER='<token global coordinator acquire>'
 
 Проверяется, что на **8081** regional **coordinator / workers / jobs** дают **403** с телом **`STANDBY_DEPLOYMENT`** (смысл: вы вызываете active-region API, но процесс поднят как пассивный ЦОД в **r2** — мутации regional нужно слать на **ACTIVE**), а **global coordinator** — успешно. В JSON сценария в `metadata` указано **`region: "r2"`** (stand-in), не r1.
 
+### 4) RSS mock: master data региона (active → switch → stand_in)
+
+Mock реализует контракт [`openapi/rss-api.yaml`](../openapi/rss-api.yaml) и крутит статусы каждые **`RSS_CYCLE_INTERVAL_SEC`** (по умолчанию **8** с).
+
+```bash
+# T0
+./scripts/demo-two-dc.sh etcd-start
+./scripts/demo-two-dc.sh rss-start
+# либо: ./scripts/demo-two-dc.sh infra-up
+
+# T1 — сервер с coordination.rss.required=true
+./scripts/demo-two-dc.sh run-active-rss
+# или фон: ./scripts/demo-two-dc.sh start-active-rss-bg
+
+# T3
+./scripts/demo-step-rss-sync.sh
+```
+
+Скрипт показывает snapshot RSS (`/v1/debug/state`), затем `GET /v1/active-region` у LES и несколько раз поллит статус, пока mock проходит цикл **active → switch → stand_in**. Маппинг: `active`→ACTIVE, `stand_in`→STANDBY, `switch`→SWITCH; `activeRegion` из RSS → `region` в etcd.
+
+Прямой SSE к mock (опционально):
+
+```bash
+curl -N "http://127.0.0.1:8090/v1/recovery-groups/demo-rg/active-region?region=r1"
+```
+
+Принудительно сменить статус mock: `curl -X POST 'http://127.0.0.1:8090/v1/debug/force?status=stand_in'`.
+
 ---
 
 ## Дополнительно (без пошаговой паузы)
@@ -136,6 +165,7 @@ export GLOBAL_SSE_BEARER='<token global coordinator acquire>'
 |---------|----------|
 | Скрипт не стартует | `chmod +x scripts/demo-step-*.sh` |
 | Нет ответа от ACTIVE | `etcd-start`, `init-file`, `run-active`, проверка `curl -sS http://127.0.0.1:8080/actuator/health` |
+| `run-active-rss` падает на старте | `rss-start` / `infra-up`, проверка `curl -sS http://127.0.0.1:8090/health` |
 | Шаг STANDBY падает на health | Запустите `run-standby` на **8081** |
 | **HTTP 409** на первом шаге happy path (лидер / job / worker уже есть) | Другой tenant или дождаться TTL старого lease |
 | **HTTP 401** на `GET …/coordinator`, workers, jobs, SSE workers/jobs | Сначала **POST …/coordinator/acquire** в этом контуре, затем **`Authorization: Bearer <token>`** из ответа (в логах шага это печатается явно перед `curl`) |

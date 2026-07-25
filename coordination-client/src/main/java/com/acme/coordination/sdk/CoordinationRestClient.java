@@ -306,6 +306,28 @@ public final class CoordinationRestClient implements AutoCloseable {
     return getJson("/v1/tenants/" + tenantId + "/active-region", null);
   }
 
+  /** Cluster-wide {@code GET /v1/active-region}. */
+  public JsonNode getClusterActiveRegion() throws Exception {
+    return getJson("/v1/active-region", null);
+  }
+
+  /** Cluster-wide {@code PUT /v1/active-region} (SRE token). */
+  public JsonNode putClusterActiveRegion(String region, String status, String sreToken) throws Exception {
+    Map<String, Object> body = new LinkedHashMap<>();
+    if (region != null) {
+      body.put("region", region);
+    }
+    if (status != null) {
+      body.put("status", status);
+    }
+    return putJson("/v1/active-region", body, sreToken);
+  }
+
+  /** {@link #putClusterActiveRegion(String, String, String)} with status omitted (keep previous). */
+  public JsonNode putClusterActiveRegion(String region, String sreToken) throws Exception {
+    return putClusterActiveRegion(region, null, sreToken);
+  }
+
   /**
    * POST /v1/rings/assign (no tenant) and build a {@link RingAssignment} from {@code ranges} only (no {@code withPos}).
    */
@@ -411,6 +433,23 @@ public final class CoordinationRestClient implements AutoCloseable {
     HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     if (resp.statusCode() / 100 != 2) {
       throw new IllegalStateException("POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
+    }
+    return json.readTree(resp.body());
+  }
+
+  private JsonNode putJson(String path, Object body, String bearerToken) throws Exception {
+    String payload = json.writeValueAsString(body);
+    HttpRequest.Builder rb =
+        HttpRequest.newBuilder(URI.create(baseUrl + path))
+            .timeout(Duration.ofSeconds(30))
+            .header("Content-Type", "application/json")
+            .PUT(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+    if (bearerToken != null && !bearerToken.isBlank()) {
+      rb.header("Authorization", "Bearer " + bearerToken.trim());
+    }
+    HttpResponse<String> resp = http.send(rb.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    if (resp.statusCode() / 100 != 2) {
+      throw new IllegalStateException("PUT " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
     }
     return json.readTree(resp.body());
   }

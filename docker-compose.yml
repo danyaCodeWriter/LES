@@ -1,0 +1,124 @@
+# Demo infra: etcd + etcdkeeper UI + RSS mock (Region State Service SSE).
+#
+#   docker compose up -d
+#   docker compose up -d rss-mock          # only RSS
+#   docker compose --profile with-etcd up -d --build coordination-with-etcd
+#   docker compose down
+#
+# Ports: etcd 2379, Etcd UI 8099, RSS mock 8090.
+# All-in-one (profile with-etcd): HTTP 8080, gRPC 9090, etcd on host ${COORD_ETCD_PORT:-12379}
+#   (inside container app still uses http://127.0.0.1:2379).
+# Spring on host: coordination.rss.base-url=http://127.0.0.1:8090
+
+name: coord-demo
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.15
+    container_name: etcd-coord-demo
+    command:
+      - /usr/local/bin/etcd
+      - --name
+      - etcd0
+      - --advertise-client-urls
+      - http://127.0.0.1:2379
+      - --listen-client-urls
+      - http://0.0.0.0:2379
+      - --initial-advertise-peer-urls
+      - http://0.0.0.0:2380
+      - --listen-peer-urls
+      - http://0.0.0.0:2380
+      - --initial-cluster
+      - etcd0=http://0.0.0.0:2380
+      - --initial-cluster-state
+      - new
+      - --initial-cluster-token
+      - coord-demo
+    ports:
+      - "2379:2379"
+      # etcdkeeper listens on 8080 inside the shared netns (see etcdkeeper service)
+      - "8099:8080"
+    networks:
+      - coord-demo-net
+
+  # Sidecar: same network namespace as etcd → in UI use http://127.0.0.1:2379
+  etcdkeeper:
+    image: evildecay/etcdkeeper:latest
+    container_name: etcdkeeper-coord-demo
+    network_mode: "service:etcd"
+    working_dir: /opt/etcdkeeper
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "exec ./etcdkeeper.bin -h 0.0.0.0 -p 8080 -timeout ${ETCD_UI_CLIENT_TIMEOUT:-30}"
+    depends_on:
+      - etcd
+
+  rss-mock:
+    build:
+      context: ./rss-mock
+    image: rss-mock:local
+    container_name: rss-mock-coord-demo
+    ports:
+      - "${RSS_MOCK_PORT:-8090}:8090"
+    environment:
+      PORT: "8090"
+      RECOVERY_GROUP: ${RSS_RECOVERY_GROUP:-demo-rg}
+      HOME_REGION: ${RSS_HOME_REGION:-r1}
+      PEER_REGION: ${RSS_PEER_REGION:-r2}
+      CYCLE_INTERVAL_SEC: ${RSS_CYCLE_INTERVAL_SEC:-8}
+      HEARTBEAT_INTERVAL_SEC: ${RSS_HEARTBEAT_INTERVAL_SEC:-2}
+    networks:
+      - coord-demo-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  # App + etcd in one container (dev). Build: Dockerfile.with-etcd
+  # Host etcd port defaults to 12379 to avoid clash with the standalone "etcd" service.
+  coordination-with-etcd:
+    profiles: ["with-etcd"]
+    build:
+      context: .
+      dockerfile: Dockerfile.with-etcd
+    image: coordination-server:with-etcd
+    container_name: coordination-with-etcd
+    ports:
+      - "${COORD_HTTP_PORT:-8080}:8080"
+      - "${COORD_GRPC_PORT:-9090}:9090"
+      - "${COORD_ETCD_PORT:-12379}:2379"
+    environment:
+      COORDINATION_ETCD_ENDPOINTS_0: http://127.0.0.1:2379
+      COORDINATION_SRE_STREAM_LISTEN_TOKEN: ${COORD_SRE_TOKEN:-sre-stream-dev-token}
+    volumes:
+      - coord-etcd-data:/var/lib/etcd
+    networks:
+      - coord-demo-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-sf",
+          "http://127.0.0.1:8080/actuator/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+networks:
+  coord-demo-net:
+    name: coord-demo-net
+    # Reuse demo-two-dc.sh network if it already exists (pre-compose demos).
+    external: true
+
+volumes:
+  coord-etcd-data:

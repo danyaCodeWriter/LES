@@ -298,6 +298,26 @@ message Ranges {
   repeated Range ranges = 1;
 }
 
+// --- Cluster-wide active region (etcd /coord/v1/cluster/activeRegion) ---
+
+message GetActiveRegionRequest {}
+
+message ActiveRegionInfo {
+  string region_id = 1;
+  string source = 2;
+  string status = 3;
+  bool regional_writes_blocked = 4;
+  string draining_previous_region = 5;
+}
+
+message SetActiveRegionRequest {
+  string region_id = 1;
+  // coordination.sre.stream-listen-token (same as HTTP PUT /v1/active-region).
+  string access_credential = 2;
+  // ACTIVE | STANDBY | SWITCH (empty = keep previous / default ACTIVE).
+  string status = 3;
+}
+
 // --- Tenant-wide coordination key watch (regional + global prefixes; idempotency keys excluded from stream scope) ---
 
 message TenantKeyWatchEvent {
@@ -344,6 +364,9 @@ service Coordination {
   rpc GetGlobalJob(GetGlobalJobRequest) returns (GetJobResponse);
 
   rpc ComputeRanges(ComputeRangesRequest) returns (ComputeRangesResponse);
+
+  rpc GetActiveRegion(GetActiveRegionRequest) returns (ActiveRegionInfo);
+  rpc SetActiveRegion(SetActiveRegionRequest) returns (ActiveRegionInfo);
 
   /** Server-streaming watch: all coordination keys under tenant {@code regions/} + {@code global/}. */
   rpc WatchTenantKeys(WatchTenantKeysRequest) returns (stream TenantKeyWatchEvent);

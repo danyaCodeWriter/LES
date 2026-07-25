@@ -14,14 +14,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * After the logical active region id changes (e.g. r1→r2), regional coordinator/worker/job mutations
- * stay disabled until etcd no longer has lease-backed keys under {@code .../regions/{oldId}/} except
- * {@code coordinationEpoch} (durable, no lease). With {@link com.acme.coordination.deployment.DeploymentRole#SWITCH},
- * the same keys are deleted proactively on each poll (operator must ensure old holders are stopped).
+ * After logical active region id changes, regional mutations stay disabled until old segment is empty
+ * (except coordinationEpoch). With cluster status {@code SWITCH}, lease keys are purged on each poll.
  */
 @Component
 public class RegionSwitchDrainPolicy {
@@ -31,34 +30,34 @@ public class RegionSwitchDrainPolicy {
   private final KV kv;
   private final Keyspace keyspace;
   private final DeploymentRegistrationPolicy deployment;
+  private final ActiveRegionMonitor activeRegionMonitor;
   private final AtomicReference<String> drainingRegionId = new AtomicReference<>(null);
   private final AtomicBoolean regionalWritesAllowed = new AtomicBoolean(true);
 
-  public RegionSwitchDrainPolicy(Client client, Keyspace keyspace, DeploymentRegistrationPolicy deployment) {
+  public RegionSwitchDrainPolicy(
+      Client client,
+      Keyspace keyspace,
+      DeploymentRegistrationPolicy deployment,
+      @Lazy ActiveRegionMonitor activeRegionMonitor) {
     this.kv = client.getKVClient();
     this.keyspace = keyspace;
     this.deployment = deployment;
+    this.activeRegionMonitor = activeRegionMonitor;
   }
 
-  /**
-   * Call when resolved active region id changes. Starts draining {@code previousRegionId} until
-   * leader/workers/jobs keys are gone.
-   */
   public void onActiveRegionIdChanged(String previousRegionId, String nextRegionId) {
     if (previousRegionId == null || nextRegionId == null || previousRegionId.equals(nextRegionId)) {
       return;
     }
     drainingRegionId.set(previousRegionId);
     regionalWritesAllowed.set(false);
-    log.info("active region switch {} -> {}; regional mutations blocked until previous segment is empty of leader/workers/jobs",
-        previousRegionId, nextRegionId);
+    log.info(
+        "active region switch {} -> {}; regional mutations blocked until previous segment is empty of leader/workers/jobs",
+        previousRegionId,
+        nextRegionId);
     refreshDrainedStateBlocking();
   }
 
-  /**
-   * ACTIVE/SWITCH: false while previous region segment still has leader/workers/jobs keys.
-   * STANDBY: always true (standby blocks regional separately).
-   */
   public boolean regionalWritesAllowed() {
     if (!deployment.participatesInRegionalDrain()) {
       return true;
@@ -84,7 +83,10 @@ public class RegionSwitchDrainPolicy {
   private void refreshDrainedStateBlocking() {
     String region = drainingRegionId.get();
     if (region == null) {
-      regionalWritesAllowed.set(true);
+      boolean wasBlocked = !regionalWritesAllowed.getAndSet(true);
+      if (wasBlocked) {
+        activeRegionMonitor.emitDeploymentSnapshotForSse();
+      }
       return;
     }
     try {
@@ -96,6 +98,7 @@ public class RegionSwitchDrainPolicy {
         drainingRegionId.set(null);
         regionalWritesAllowed.set(true);
         log.info("region {} drained (no leader/workers/jobs keys) — regional writes enabled", region);
+        activeRegionMonitor.emitDeploymentSnapshotForSse();
       } else {
         regionalWritesAllowed.set(false);
       }
@@ -105,15 +108,11 @@ public class RegionSwitchDrainPolicy {
     }
   }
 
-  /**
-   * При {@link com.acme.coordination.deployment.DeploymentRole#SWITCH} удаляем lease-ключи старого сегмента
-   * (leader, workers, jobs), не трогая {@code coordinationEpoch}. Безопасно только если процессы, державшие
-   * lease, уже остановлены — иначе возможна неконсистентность у клиентов.
-   */
   private void purgeDrainingLeaseKeysBlocking(String previousRegionId) throws Exception {
     String needle = "/regions/" + previousRegionId + "/";
-    var resp = kv.get(bs(keyspace.allTenantsScanPrefix()), GetOption.newBuilder().isPrefix(true).build())
-        .get(5, TimeUnit.SECONDS);
+    var resp =
+        kv.get(bs(keyspace.allTenantsScanPrefix()), GetOption.newBuilder().isPrefix(true).build())
+            .get(5, TimeUnit.SECONDS);
     int deleted = 0;
     for (var kvp : resp.getKvs()) {
       String k = kvp.getKey().toString(StandardCharsets.UTF_8);
@@ -133,8 +132,9 @@ public class RegionSwitchDrainPolicy {
 
   private boolean etcdPreviousRegionDrained(String previousRegionId) throws Exception {
     String needle = "/regions/" + previousRegionId + "/";
-    var resp = kv.get(bs(keyspace.allTenantsScanPrefix()), GetOption.newBuilder().isPrefix(true).build())
-        .get(5, TimeUnit.SECONDS);
+    var resp =
+        kv.get(bs(keyspace.allTenantsScanPrefix()), GetOption.newBuilder().isPrefix(true).build())
+            .get(5, TimeUnit.SECONDS);
     for (var kvp : resp.getKvs()) {
       String k = kvp.getKey().toString(StandardCharsets.UTF_8);
       if (!k.contains(needle)) {

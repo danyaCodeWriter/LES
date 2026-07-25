@@ -28,7 +28,6 @@ public class ActiveRegionInfoController {
     this.deployment = deployment;
   }
 
-  /** Current resolved active region (same value used for short-path coordinator/worker/job APIs). */
   @GetMapping("/active-region")
   public Map<String, Object> activeRegion(@PathVariable String tenantId) {
     var s = activeRegion.snapshot();

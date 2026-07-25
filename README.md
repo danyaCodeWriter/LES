@@ -41,7 +41,7 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 Сервер слушает порт `grpc.server.port` (по умолчанию **9090**), сервис `coordination.v1.Coordination`. Источник контракта: [`proto/coordination/v1/coordination.proto`](proto/coordination/v1/coordination.proto).
 
-Координатор active-region (логический регион подставляет сервер из конфигурации active-region):
+Координатор active-region (логический регион подставляет сервер из etcd, ключ `/coord/v1/cluster/activeRegion`):
 
 ```bash
 grpcurl -plaintext -d '{"tenantId":"team-a","coordinatorId":"payments","instanceId":"pod-1","ttlSeconds":10,"metadata":{}}' \
@@ -77,13 +77,13 @@ grpcurl -plaintext -d '{"workerIds":["worker-a","worker-b"],"virtualNodes":128}'
 - **Координатор** (`acquire` / `renew`): новый лидер записывается только в транзакции, где ключ лидера **отсутствует** (`create_revision == 0`) и выполняется CAS по `coordinationEpoch`. Значение лидера привязано к **lease** и содержит **`token`** (как у воркеров): сохраните его из ответа `acquire` и передавайте на каждый `renew`. Если старый процесс перестал продлевать, etcd удалит ключ после TTL; до этого **никакой другой инстанс не сможет acquire** ту же роль (regional или global). Ключ эпохи — устойчивые метаданные для fencing, а не замена «живости» lease.
 - **Воркеры** (`register` / `heartbeat`): та же идея — `register` проходит только когда ключа воркера ещё нет; ключ на lease и исчезает, когда heartbeat прекращаются.
 - **Задачи** (`:acquire` / `:renew` / `:release`): **`:acquire`** проверяет, что `holder` — это активный regional (или global) **`coordinatorId`** или **зарегистрированный `workerId`** в этом контуре, и что **`participantToken`** совпадает с токеном `coordinator/acquire` или с токеном `workers/register` (одних id недостаточно). В ответе по-прежнему отдельный **`token`** лока для **`:renew`** / **`:release`** (тело `{"token":"..."}`), как у секрета lease координатора.
-- **Чтение** (`GET` coordinator / workers / jobs и SSE `stream/workers` / `stream/jobs`, не `active-region`): для соответствующего контура передавайте **`Authorization: Bearer <token из coordinator acquire>`** (для active-region URL — токен regional-лидера; для `/global/...` — токен global-лидера). Та же строка, что для `renew`. Альтернатива: заголовок **`X-Coordinator-Token`**. Для **только** SSE `.../stream/workers|jobs` и `.../global/stream/workers|jobs` дополнительно допускается статический токен **`coordination.sre.stream-listen-token`** (см. `application.yml`, переопределение через **`COORDINATION_SRE_STREAM_LISTEN_TOKEN`**). В JSON на чтениях renewal-**секреты** (`token` у coordinator/workers/jobs) опускаются. Без корректного доказательства: **401** (`COORDINATOR_READ_TOKEN_REQUIRED`) или **403** (`COORDINATOR_READ_FORBIDDEN` / `COORDINATOR_READ_NO_LEADER`).
+- **Чтение** (`GET` coordinator / workers / jobs и SSE `stream/workers` / `stream/jobs`, не `active-region`): для соответствующего контура передавайте **`Authorization: Bearer <token из coordinator acquire>`** (для active-region URL — токен regional-лидера; для `/global/...` — токен global-лидера). Та же строка, что для `renew`. Альтернатива: заголовок **`X-Coordinator-Token`**. Для SSE `.../stream/workers|jobs|keys` и `.../global/stream/workers|jobs`, а также для **`PUT /v1/active-region`** / gRPC **`SetActiveRegion`**, допускается статический токен **`coordination.sre.stream-listen-token`** (см. `application.yml`, переопределение через **`COORDINATION_SRE_STREAM_LISTEN_TOKEN`**). В JSON на чтениях renewal-**секреты** (`token` у coordinator/workers/jobs) опускаются. Без корректного доказательства: **401** (`COORDINATOR_READ_TOKEN_REQUIRED`) или **403** (`COORDINATOR_READ_FORBIDDEN` / `COORDINATOR_READ_NO_LEADER`).
 
 Для **regional** coordinator / worker / job параметр `ttlSeconds` при acquire/register должен быть **от 10 до 300 секунд включительно** (проверка в сервисах, REST-валидация; в gRPC `IllegalArgumentException` мапится в `INVALID_ARGUMENT`).
 
 После отказа или потери старой площадки **новые pod’ы в выжившем регионе могут занять координатора (или снова использовать тот же job id) только после истечения прежних ключей на lease** (или явного release). Нет API, которое выдало бы второго владельца, пока жив первый ключ.
 
-**Switchover active-region:** при смене настроенного **id** активного региона сервер входит в фазу **drain**: в `GET /v1/tenants/{tenant}/active-region` (и в SSE) появляются `regionalWritesBlocked` и `drainingPreviousRegion`. Пока `regionalWritesBlocked` истинно, **active-region** lease-мутации (coordinator acquire/renew, worker register/heartbeat/deregister, job acquire/renew/release) возвращают **HTTP 409** с `REGION_DRAIN` (в gRPC: **FAILED_PRECONDITION**). Сервер снимает drain, когда в etcd под префиксом старого региона **нет** ключей, кроме **`coordinationEpoch`**. После этого клиенты снова могут acquire/register/job в новом сегменте.
+**Switchover active-region:** при смене **id** активного региона через **`PUT /v1/active-region`** (SRE token) сервер входит в фазу **drain**: в `GET /v1/active-region` (и в SSE) появляются `regionalWritesBlocked` и `drainingPreviousRegion`. Пока `regionalWritesBlocked` истинно, **active-region** lease-мутации (coordinator acquire/renew, worker register/heartbeat/deregister, job acquire/renew/release) возвращают **HTTP 409** с `REGION_DRAIN` (в gRPC: **FAILED_PRECONDITION**). Сервер снимает drain, когда в etcd под префиксом старого региона **нет** ключей, кроме **`coordinationEpoch`**. После этого клиенты снова могут acquire/register/job в новом сегменте.
 
 **Ускоренный drain (роль развёртывания `SWITCH`):** задайте `COORDINATION_DEPLOYMENT_ROLE=SWITCH` (или `switch-over`, опрос как у `ACTIVE`/`STANDBY`). Regional-мутации для клиентов по-прежнему **403** (как у STANDBY), но этот хост **участвует в drain** (поэтому `regionalWritesBlocked` может оставаться **true**, а **409** `REGION_DRAIN` действует, пока есть старые ключи). На каждом опросе drain сервер **удаляет** lease-ключи под префиксом draining-региона (лидер, воркеры, задачи) для **всех tenant**, оставляя **`coordinationEpoch`**. Используйте только когда операторы **остановили** все процессы, которые ещё держали эти lease; иначе возможно неконсистентное поведение клиентов. После завершения переключения верните роль в **`ACTIVE`**.
 
@@ -144,16 +144,36 @@ try (var grpc = new CoordinationGrpcClient("localhost", 9090)) {
 
 ### Для разработчика (Docker, CLI, demo-скрипты)
 
-**Docker обязателен** для типичного локального цикла: **etcd** (и UI etcdkeeper) поднимаются через [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) в **контейнере**. Без запущенного Docker daemon команды `etcd-start` / `etcd-verify` не смогут стартовать кластер; Spring по умолчанию ждёт etcd по [`coordination-server/src/main/resources/application.yml`](coordination-server/src/main/resources/application.yml) — `http://127.0.0.1:2379` (при другом адресе задайте `coordination.etcd.endpoints` или соответствующие переменные окружения).
+**Docker обязателен** для типичного локального цикла: **etcd**, **etcdkeeper** и (для RSS-демо) **rss-mock** поднимаются через [`docker-compose.yml`](docker-compose.yml) / [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) (`etcd-start`, `rss-start`, `infra-up`). Без Docker daemon команды `etcd-start` / `etcd-verify` не смогут стартовать кластер; Spring по умолчанию ждёт etcd по [`coordination-server/src/main/resources/application.yml`](coordination-server/src/main/resources/application.yml) — `http://127.0.0.1:2379` (при другом адресе задайте `coordination.etcd.endpoints` или соответствующие переменные окружения).
 
 **Быстрый старт одного ACTIVE** (из **корня репозитория**, JDK **21+**, `JAVA_HOME`, `mvn` в `PATH`):
 
 ```bash
 chmod +x scripts/demo-two-dc.sh scripts/demo-step-*.sh
-./scripts/demo-two-dc.sh etcd-start    # etcd :2379 + UI в Docker (см. вывод скрипта)
+./scripts/demo-two-dc.sh etcd-start    # etcd :2379 + UI (docker compose)
 ./scripts/demo-two-dc.sh etcd-verify   # опционально: проверка доступности etcd
-./scripts/demo-two-dc.sh init-file     # записать активный регион в файл (нужно для сценариев со сменой региона)
+./scripts/demo-two-dc.sh init-file     # bootstrap active region (yaml / PUT; нужен запущенный ACTIVE)
 ./scripts/demo-two-dc.sh run-active    # coordination-server: HTTP :8080, gRPC :9090
+```
+
+**RSS mock** (цикл `active` → `switch` → `stand_in` каждые ~8 с):
+
+```bash
+./scripts/demo-two-dc.sh rss-start       # :8090
+./scripts/demo-two-dc.sh run-active-rss  # rss.required=true
+./scripts/demo-step-rss-sync.sh
+```
+
+Или одной командой инфра: `./scripts/demo-two-dc.sh infra-up` / `docker compose up -d`.
+
+**All-in-one** (приложение + etcd в одном контейнере, без отдельного etcd-сервиса):
+
+```bash
+docker build -f Dockerfile.with-etcd -t coordination-server:with-etcd .
+docker run --rm -p 8080:8080 -p 9090:9090 -p 2379:2379 coordination-server:with-etcd
+# или:
+docker compose --profile with-etcd up -d --build coordination-with-etcd
+# HTTP :8080, gRPC :9090, etcd с хоста :12379 (внутри контейнера app → 127.0.0.1:2379)
 ```
 
 Тот же сервер **без** `run-active` (если уже собран `coordination-hash`):
@@ -173,6 +193,7 @@ mvn -f coordination-server/pom.xml spring-boot:run
 | `scripts/demo-step-workers-and-keys.sh` | GET worker jobs + global KV, опционально очистка etcd tenant |
 | `scripts/demo-step-job-lock-contention.sh` | Конкуренция за job lock |
 | `scripts/demo-step-standby-regional-denied.sh` | STANDBY и отказ regional-мутаций |
+| `scripts/demo-step-rss-sync.sh` | Bootstrap/sync active-region из RSS mock (нужны `rss-start` + `run-active-rss`) |
 | `scripts/demo-step-sse-workers-jobs.sh` | Два SSE в отдельном терминале (`COORD_SSE_BEARER`; для global — `DEMO_SSE_SCOPE=global`, `GLOBAL_SSE_BEARER`) |
 | `scripts/demo-step-bench-rest.sh` / `scripts/demo-step-bench-grpc.sh` | Замеры латентности REST / gRPC (для gRPC нужен **grpcurl**, см. `BENCH_PROTO_ROOT`) |
 
@@ -181,7 +202,7 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 ### Демо (ACTIVE + STANDBY + switchover)
 
-Скрипт для живого демо на два процесса сервера (8080 ACTIVE / 8081 STANDBY), смена active region через файл и проверка **403** на active-region мутациях со STANDBY. Команда `etcd-start` поднимает **etcd** и **etcdkeeper** в режиме **sidecar** (общий network namespace с etcd). В UI укажите **`http://127.0.0.1:2379`** и версию **v3** (для UI это тот же netns, что и etcd; Spring на хосте по-прежнему `http://127.0.0.1:2379`). Проверка: `./scripts/demo-two-dc.sh etcd-verify`.
+Скрипт для живого демо на два процесса сервера (8080 ACTIVE / 8081 STANDBY), смена active region через **RSS** или **`PUT /v1/active-region`** (SRE) и проверка **403** на active-region мутациях со STANDBY. Команда `etcd-start` / `infra-up` поднимает стек из [`docker-compose.yml`](docker-compose.yml) (**etcd** + **etcdkeeper** sidecar + опционально **rss-mock**). В UI укажите **`http://127.0.0.1:2379`** и версию **v3**. Проверка: `./scripts/demo-two-dc.sh etcd-verify`.
 
 - Пошаговый сценарий для ведущего (что сказать, какие терминалы): [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md)
 - Обзор для Confluence / пресейла (гарантии, API, **use-cases**, 2 ЦОД + etcd): [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md)
@@ -192,8 +213,8 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 Публичный контракт делится на **две** семьи URL/gRPC (клиент **не передаёт** `regionId` в путях или в protobuf):
 
-1. **Active region** — короткие пути `/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/...` (кроме `stream/active-region`). Сервер сам подставляет **текущий active region** из конфигурации (файл → env → значение по умолчанию), см. `coordination.active-region.*`.  
-   В etcd данные лежат под `.../tenants/{tenant}/regions/{logicalId}/...`; **logicalId** задаётся только операционно на сервере, не через API.
+1. **Active region** — короткие пути `/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/...` (кроме `stream/active-region`). Сервер сам подставляет **текущий active region** из **etcd** (cluster key `/coord/v1/cluster/activeRegion`; задаётся `PUT /v1/active-region` / gRPC `SetActiveRegion` с SRE-токеном).  
+   В etcd данные tenant лежат под `.../tenants/{tenant}/regions/{logicalId}/...`.
 
    **Switchover:** подпишитесь на `GET /v1/tenants/{tenant}/stream/active-region` и следите за `regionalWritesBlocked`. Пока drain активен после смены id региона, новые acquire/register/job в active-region отклоняются (**409**). Когда `regionalWritesBlocked` стал **false**, заново зарегистрируйте coordinator/workers/jobs — короткие пути пишут в новый сегмент автоматически.
 
@@ -201,11 +222,22 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 ### Роль развёртывания (ACTIVE, STANDBY, SWITCH)
 
-- **`ACTIVE`** — принимает **active-region** мутации (короткие пути) и global.
-- **`STANDBY`** — **active-region** мутации отклоняются (HTTP **403**, gRPC **FAILED_PRECONDITION** на acquire/renew/register/heartbeat/job acquire|release|renew); **global** всегда разрешён (включая global job renew).
-- **`SWITCH`** — для клиентов то же, что **STANDBY** (**403** на regional мутации, global ок); плюс участие в **REGION_DRAIN** и принудительное удаление старых lease-ключей draining-сегмента (см. выше). После переключения верните роль в **`ACTIVE`**.
-- На STANDBY без мутаций: `GET /active-region`, SSE `GET /stream/active-region`, любые **GET** чтения по active-region; **не** доступны SSE `stream/workers` и `stream/jobs` для active-region.
-- **Смена роли без рестарта JVM:** раз в `coordination.active-region.poll-interval-ms` сервер перечитывает, в порядке приоритета, **`coordination.deployment.role-file`** (первая строка: `ACTIVE`, `STANDBY` / `stand-in`, или `SWITCH` / `switch-over`), затем **`System.getenv(coordination.deployment.role-env-var)`** (по умолчанию `COORDINATION_DEPLOYMENT_ROLE`), затем статический **`coordination.deployment.role`** из конфигурации. При смене роли сразу меняется поведение REST/gRPC; подписчики **`GET .../stream/active-region`** получают новое событие с обновлённым полем **`status`**. Примечание: у уже запущенного процесса переменные окружения ОС обычно **не** обновляются извне — для демо и k8s без rolling pod надёжнее тот же приём, что для active region: **смонтировать файл** и менять его содержимое.
+Статус **`ACTIVE` / `STANDBY` / `SWITCH`** хранится в etcd (вместе с logical `region`) и задаётся через
+**RSS** (master data, SSE) при `coordination.rss.required=true`, либо через yaml bootstrap /
+**`PUT /v1/active-region`** (SRE) когда RSS не обязателен.
+На старте JVM: если `rss.required=false` — в etcd пишутся `coordination.active-region.value` (**r1**) и
+`status` (**ACTIVE**); если `rss.required=true` — первый SSE `state` из RSS (иначе старт падает).
+
+- **`ACTIVE`** — regional + global мутации.
+- **`STANDBY`** — regional мутации **403**; global ок.
+- **`SWITCH`** — как STANDBY для клиентов + участие в REGION_DRAIN и ускоренный purge старых ключей.
+
+```bash
+curl -sS -X PUT "$BASE/v1/active-region" \
+  -H "Authorization: Bearer $SRE_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"region":"r1","status":"STANDBY"}'
+```
 
 ## Сквозной сценарий: как жить с сервисом (клиентское приложение)
 
@@ -213,13 +245,21 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 ### 1. Выбор tenant и проверка active region
 
-Один `tenantId` на изолированный контур (команду / продукт). Убедитесь, что вы знаете, какой logical active region сейчас (операции задают файл/env):
+Один `tenantId` на изолированный контур (команду / продукт). Убедитесь, что вы знаете, какой logical active region сейчас (SRE задаёт через `PUT /v1/active-region`):
 
 ```bash
+curl -sS "$BASE/v1/active-region" | jq .
+# совместимый alias:
 curl -sS "$BASE/v1/tenants/$TENANT/active-region" | jq .
+
+# смена (нужен coordination.sre.stream-listen-token):
+curl -sS -X PUT "$BASE/v1/active-region" \
+  -H "Authorization: Bearer $SRE_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"region":"r1"}' | jq .
 ```
 
-При смене **id** active region сначала смотрите SSE `GET .../stream/active-region` или JSON `GET .../active-region`: дождитесь **`regionalWritesBlocked: false`** (окончание drain после TTL старых ключей), затем перезапустите регистрации (координатор, воркеры, локи) в новом сегменте etcd.
+При смене **id** active region сначала смотрите SSE `GET .../stream/active-region` или JSON `GET /v1/active-region`: дождитесь **`regionalWritesBlocked: false`** (окончание drain после TTL старых ключей), затем перезапустите регистрации (координатор, воркеры, локи) в новом сегменте etcd.
 
 ### 2. Воркеры (каждый процесс / pod)
 
@@ -277,7 +317,7 @@ gRPC `ComputeRanges`: то же поведение — поле `with_points: tr
 
 ### 7. Наблюдение
 
-- `GET .../stream/workers` / `stream/jobs` — почти в реальном времени отражают изменения ключей в etcd; обычно нужен **тот же Bearer**, что для `GET .../workers` (токен coordinator). Для SRE можно задать **`coordination.sre.stream-listen-token`** (или env **`COORDINATION_SRE_STREAM_LISTEN_TOKEN`**) — тогда **только эти четыре SSE** (regional workers/jobs + global workers/jobs) принимают этот статический секрет в `Authorization: Bearer` или `X-Coordinator-Token` **вместо** токена лидера.
+- `GET .../stream/workers` / `stream/jobs` — почти в реальном времени отражают изменения ключей в etcd; обычно нужен **тот же Bearer**, что для `GET .../workers` (токен coordinator). Для SRE можно задать **`coordination.sre.stream-listen-token`** (или env **`COORDINATION_SRE_STREAM_LISTEN_TOKEN`**) — тогда SSE workers/jobs/keys (regional + global workers/jobs) и **`PUT /v1/active-region`** принимают этот статический секрет в `Authorization: Bearer` или `X-Coordinator-Token`.
 - `GET .../workers` / `workers/ids` — полные записи или только id; только с Bearer coordinator.
 
 ## Примеры REST
@@ -286,7 +326,7 @@ gRPC `ComputeRanges`: то же поведение — поле `with_points: tr
 
 - `BASE=http://localhost:8080`
 - `TENANT=team-a`
-- По желанию: `export COORDINATION_ACTIVE_REGION=r1`, чтобы сервер сопоставил logical active region с `r1` (клиенты по-прежнему используют те же короткие URL).
+- Задайте logical region через SRE: `curl -X PUT "$BASE/v1/active-region" -H "Authorization: Bearer sre-stream-dev-token" -H 'content-type: application/json' -d '{"region":"r1"}'`
 
 ### Acquire coordinator (сохраните token для GET ниже)
 

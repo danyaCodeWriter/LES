@@ -44,7 +44,7 @@
 - **Два инстанса приложения** coordination-server: например **DC1 (r1)** и **DC2 (r2)** — разные `COORDINATION_DEPLOYMENT_ROLE` / файлы роли (**ACTIVE** в «живом» ЦОД для regional-мутаций, **STANDBY** в резервном), один и тот же логический **tenant**.
 - **etcd кластер на три ЦОД** (например узлы в **r0, r1, r2**): выносливость к потере одного сайта; **кворум** и latency между узлами — предмет SRE (RTT влияет на commit).
 
-**Локальный стенд:** часто один etcd на `127.0.0.1:2379` и два процесса Spring на разных портах (например **8080** и **8081**) с разными ролями деплоя; смена active region — через файл или переменные окружения согласно конфигурации `coordination.active-region.*`.
+**Локальный стенд:** часто один etcd на `127.0.0.1:2379` и два процесса Spring на разных портах (например **8080** и **8081**) с разными ролями деплоя; смена active region — через **`PUT /v1/active-region`** с SRE-токеном (значение в etcd, ключ `/coord/v1/cluster/activeRegion`).
 
 В проде те же **пути URL и семантика**, меняется топология etcd и сетевые политики.
 
@@ -352,7 +352,7 @@ curl -sS "{BASE}/v1/tenants/{TENANT}/active-region"
   "region": "r1",
   "activeRegion": "r1",
   "status": "active",
-  "source": "env:COORDINATION_ACTIVE_REGION",
+  "source": "etcd",
   "regionalWritesBlocked": false,
   "drainingPreviousRegion": null
 }
