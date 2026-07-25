@@ -67,9 +67,10 @@ public class ClusterActiveRegionController {
     if (tenantId != null) {
       m.put("tenantId", tenantId);
     }
-    m.put("region", s.regionId());
-    m.put("status", deployment.instanceStatusWire());
+    // region = where THIS LES instance is deployed; activeRegion = who serves the cluster
+    m.put("region", activeRegion.instanceHomeRegion());
     m.put("activeRegion", s.regionId());
+    m.put("status", deployment.instanceStatusWire());
     m.put("source", s.source());
     m.put("regionalWritesBlocked", drainPolicy.regionalWritesBlocked());
     m.put("drainingPreviousRegion", drainPolicy.drainingPreviousRegionId().orElse(null));

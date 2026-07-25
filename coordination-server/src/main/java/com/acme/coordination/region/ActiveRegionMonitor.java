@@ -22,8 +22,15 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
 /**
- * Logical region id + deployment status (ACTIVE/STANDBY/SWITCH) from cluster etcd key.
- * Bootstrap: RSS (when {@code coordination.rss.required=true}) or yaml {@code coordination.active-region.*}.
+ * Per-home POV of active region + status from etcd key
+ * {@code /coord/v1/cluster/regions/{home}/activeRegion}.
+ *
+ * <p>Bootstrap:
+ * <ul>
+ *   <li>{@code rss.required=false} — yaml {@code active-region.*} (defaults r1/r1/ACTIVE).
+ *   <li>{@code rss.required=true} without yaml starters — block on first RSS {@code state}.
+ *   <li>{@code rss.required=true} with yaml starters ({@code home} set) — yaml then background RSS.
+ * </ul>
  */
 @Component
 public class ActiveRegionMonitor {
@@ -38,10 +45,12 @@ public class ActiveRegionMonitor {
   private final JsonCodec json;
   private final ObjectMapper objectMapper;
   private final RegionSwitchDrainPolicy drainPolicy;
+  private final InstanceHomeRegion instanceHome;
   private final AtomicReference<ActiveRegionSnapshot> current =
       new AtomicReference<>(new ActiveRegionSnapshot("r1", DeploymentRole.ACTIVE, "initial"));
   private final Sinks.Many<String> changes = Sinks.many().multicast().onBackpressureBuffer();
   private volatile Disposable watchDisposable;
+  private volatile String watchedHome;
 
   public ActiveRegionMonitor(
       ActiveRegionService activeRegionService,
@@ -51,7 +60,8 @@ public class ActiveRegionMonitor {
       Keyspace keyspace,
       JsonCodec json,
       ObjectMapper objectMapper,
-      RegionSwitchDrainPolicy drainPolicy
+      RegionSwitchDrainPolicy drainPolicy,
+      InstanceHomeRegion instanceHome
   ) {
     this.activeRegionService = activeRegionService;
     this.props = props;
@@ -61,16 +71,14 @@ public class ActiveRegionMonitor {
     this.json = json;
     this.objectMapper = objectMapper;
     this.drainPolicy = drainPolicy;
+    this.instanceHome = instanceHome;
   }
 
   @PostConstruct
   void start() {
     seedBootstrapIntoEtcd();
     refreshFromEtcd();
-    watchDisposable =
-        watch
-            .watchKey(keyspace.clusterActiveRegionKey())
-            .subscribe(this::onWatchEvent, e -> log.warn("active-region etcd watch failed", e));
+    ensureWatchForCurrentHome();
     if (rssSync.rssRequired()) {
       rssSync.startBackgroundSync();
     }
@@ -82,14 +90,40 @@ public class ActiveRegionMonitor {
     if (d != null) {
       d.dispose();
     }
+    watchDisposable = null;
+    watchedHome = null;
+  }
+
+  /** Rebind etcd watch when RSS changes LES home (per-home key). */
+  @org.springframework.context.event.EventListener
+  public void onHomeRegionChanged(HomeRegionChangedEvent event) {
+    log.info(
+        "home region event: {} -> {}; rebinding etcd watch to per-home key",
+        event.previousHome(),
+        event.home());
+    ensureWatchForCurrentHome();
+    refreshFromEtcd();
   }
 
   public String activeRegionId() {
     return current.get().regionId();
   }
 
+  /** Home region of this LES JVM (RSS {@code state.region} or yaml seed). */
+  public String instanceHomeRegion() {
+    return instanceHome.get();
+  }
+
   public ActiveRegionSnapshot snapshot() {
     return current.get();
+  }
+
+  /**
+   * Role of this LES for gates: status from <strong>this home's</strong> etcd key
+   * (RSS POV for {@link InstanceHomeRegion#get()}).
+   */
+  public DeploymentRole effectiveRole() {
+    return current.get().status();
   }
 
   public Flux<String> activeRegionEvents() {
@@ -98,7 +132,32 @@ public class ActiveRegionMonitor {
 
   @Scheduled(fixedDelayString = "${coordination.active-region.poll-interval-ms:5000}")
   public void tick() {
+    ensureWatchForCurrentHome();
     refreshFromEtcd();
+  }
+
+  private synchronized void ensureWatchForCurrentHome() {
+    String home;
+    try {
+      home = instanceHome.get();
+    } catch (IllegalStateException e) {
+      log.warn("skip active-region watch: {}", e.getMessage());
+      return;
+    }
+    if (home.equals(watchedHome) && watchDisposable != null && !watchDisposable.isDisposed()) {
+      return;
+    }
+    Disposable prev = watchDisposable;
+    if (prev != null) {
+      prev.dispose();
+    }
+    String key = keyspace.clusterActiveRegionKey(home);
+    watchedHome = home;
+    watchDisposable =
+        watch
+            .watchKey(key)
+            .subscribe(this::onWatchEvent, e -> log.warn("active-region etcd watch failed key={}", key, e));
+    log.info("watching per-home active-region key={}", key);
   }
 
   public void emitDeploymentSnapshotForSse() {
@@ -112,7 +171,16 @@ public class ActiveRegionMonitor {
   private void seedBootstrapIntoEtcd() {
     try {
       if (rssSync.rssRequired()) {
-        rssSync.awaitInitialState();
+        if (props.hasYamlActiveRegionStarters()) {
+          // Starters in yaml: operate on them and wait for RSS in background.
+          rssSync.applyYamlBootstrapToEtcd();
+          log.info(
+              "RSS required but yaml starters present (home={}): started on yaml, waiting for RSS",
+              instanceHome.get());
+        } else {
+          // No starters: first home/activeRegion/status must come from RSS or we do not start.
+          rssSync.awaitInitialState();
+        }
       } else {
         rssSync.applyYamlBootstrapToEtcd();
       }
@@ -203,9 +271,9 @@ public class ActiveRegionMonitor {
   private String serialize(ActiveRegionSnapshot s) {
     try {
       java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
-      m.put("region", s.regionId());
-      m.put("status", s.status().wire());
+      m.put("region", instanceHome.get());
       m.put("activeRegion", s.regionId());
+      m.put("status", effectiveRole().wire());
       m.put("source", s.source());
       m.put("regionalWritesBlocked", drainPolicy.regionalWritesBlocked());
       m.put("drainingPreviousRegion", drainPolicy.drainingPreviousRegionId().orElse(null));

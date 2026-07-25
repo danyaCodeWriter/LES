@@ -21,14 +21,10 @@ import java.util.function.Consumer;
 /**
  * Thin REST client for coordination-server (Jackson JSON).
  *
- * <p>Typical liveness loop: {@link #registerWorker} / {@link #registerWorkerGlobal} → save {@code token} →
- * {@link #workerHeartbeat} / {@link #workerHeartbeatGlobal} until shutdown → {@link #deregisterWorker} /
- * {@link #deregisterWorkerGlobal}. Coordinator: {@link #acquireCoordinator} → save {@code token} from JSON →
- * {@link #renewCoordinator} with that token. For job locks: {@link #acquireJob} with {@code holder} =
- * coordinatorId or registered workerId and matching {@code participantToken} (coordinator acquire token or worker
- * register token) → save job {@code token} from JSON → periodic {@link #renewJob} → {@link #releaseJob} with that job
- * token. Consistent-hash: {@link #assignRing} then
- * {@link RingAssignment#workerFor(Object)}.
+ * <p>Low-level: {@link #registerWorker}, {@link #acquireCoordinator}, {@link #acquireJob}, renew/heartbeat by hand.
+ *
+ * <p>Preferred for production loops: {@link com.acme.coordination.sdk.session.CoordinationSessions} —
+ * {@code holdWorker} / {@code holdCoordinator} / {@code holdJob} with auto-renew and {@code try}-with-resources.
  *
  * <p>GET coordinator / workers / jobs (and SSE workers/jobs streams) require the active leader's renew token:
  * {@code Authorization: Bearer <coordinator acquire token>} (regional vs global scope must match the URL). GET a
@@ -452,6 +448,14 @@ public final class CoordinationRestClient implements AutoCloseable {
       throw new IllegalStateException("PUT " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
     }
     return json.readTree(resp.body());
+  }
+
+  /**
+   * Sessions with auto-renew / heartbeat (regional or global). Caller must {@code close()} the returned
+   * {@link com.acme.coordination.sdk.session.CoordinationSessions} (shuts down the renewer thread).
+   */
+  public com.acme.coordination.sdk.session.CoordinationSessions sessions() {
+    return new com.acme.coordination.sdk.session.CoordinationSessions(this);
   }
 
   @Override

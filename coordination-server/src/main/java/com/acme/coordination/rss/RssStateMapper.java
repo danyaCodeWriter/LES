@@ -23,7 +23,9 @@ final class RssStateMapper {
       return Optional.empty();
     }
     long rev = ev.revision() == null ? 0L : ev.revision();
-    return Optional.of(new RssMappedState(regionId.trim(), role, rev));
+    String home =
+        ev.region() == null || ev.region().isBlank() ? "" : ev.region().trim();
+    return Optional.of(new RssMappedState(home, regionId.trim(), role, rev));
   }
 
   static Optional<RssMappedState> parseStateData(ObjectMapper mapper, String dataJson) {

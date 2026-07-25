@@ -1,6 +1,7 @@
 package com.acme.coordination.rss;
 
 import com.acme.coordination.config.CoordinationProperties;
+import com.acme.coordination.region.InstanceHomeRegion;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,15 +26,32 @@ public class RssClient {
   private static final Logger log = LoggerFactory.getLogger(RssClient.class);
 
   private final CoordinationProperties props;
+  private final InstanceHomeRegion instanceHome;
   private final ObjectMapper objectMapper;
   private final WebClient.Builder webClientBuilder;
   private final AtomicLong lastRevision = new AtomicLong(0);
 
   public RssClient(
-      CoordinationProperties props, ObjectMapper objectMapper, WebClient.Builder webClientBuilder) {
+      CoordinationProperties props,
+      InstanceHomeRegion instanceHome,
+      ObjectMapper objectMapper,
+      WebClient.Builder webClientBuilder) {
     this.props = props;
+    this.instanceHome = instanceHome;
     this.objectMapper = objectMapper;
     this.webClientBuilder = webClientBuilder;
+  }
+
+  /** Home for {@code ?region=}: RSS-resolved if known, else config seed. */
+  private String queryHome() {
+    if (instanceHome.hasRssHome()) {
+      return instanceHome.get();
+    }
+    String seed = instanceHome.configuredSeed();
+    if (!seed.isBlank()) {
+      return seed;
+    }
+    return instanceHome.get();
   }
 
   /** First {@code state} event (single connection, no reconnect loop). */
@@ -80,7 +98,7 @@ public class RssClient {
               var b =
                   uriBuilder
                       .path("/v1/recovery-groups/{recoveryGroup}/active-region")
-                      .queryParam("region", rss.homeRegion());
+                      .queryParam("region", queryHome());
               if (fromRev > 0) {
                 b.queryParam("from_revision", fromRev);
               }
@@ -96,7 +114,7 @@ public class RssClient {
                     "RSS SSE connecting {}/v1/recovery-groups/{}/active-region?region={} (from_revision={})",
                     rss.baseUrl(),
                     rss.recoveryGroup(),
-                    rss.homeRegion(),
+                    queryHome(),
                     fromRev));
   }
 

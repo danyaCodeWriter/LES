@@ -36,7 +36,7 @@ public class EtcdIntegrationTest {
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "ACTIVE", 5000L),
+            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre(""),
             new CoordinationProperties.Limits(0),
@@ -49,7 +49,7 @@ public class EtcdIntegrationTest {
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "ACTIVE", 5000L),
+            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre(""),
             new CoordinationProperties.Limits(maxKeys),
@@ -242,18 +242,19 @@ public class EtcdIntegrationTest {
   void clusterActiveRegion_roundTripInEtcd() throws Exception {
     JsonCodec json = new JsonCodec(new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
     Keyspace ks = new Keyspace("/coord/v1/tenants");
-    Assertions.assertEquals("/coord/v1/cluster/activeRegion", ks.clusterActiveRegionKey());
+    Assertions.assertEquals("/coord/v1/cluster/regions/r1/activeRegion", ks.clusterActiveRegionKey("r1"));
     var props =
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "ACTIVE", 5000L),
+            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre("sre-test-token"),
             new CoordinationProperties.Limits(0),
             null);
     var sre = new com.acme.coordination.security.SreTokenVerifier(props);
-    ActiveRegionService ars = new ActiveRegionService(client, ks, json, sre);
+    var home = new com.acme.coordination.region.InstanceHomeRegion(props, event -> {});
+    ActiveRegionService ars = new ActiveRegionService(client, ks, json, sre, home);
     Assertions.assertTrue(ars.get().get().isEmpty());
     var state = ars.setWithSre("eu-west", "ACTIVE", "sre-test-token").get();
     Assertions.assertEquals("eu-west", state.regionId());

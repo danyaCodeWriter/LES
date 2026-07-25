@@ -14,7 +14,7 @@ class SreTokenVerifierTest {
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord", Duration.ofSeconds(1), Duration.ofSeconds(1)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "ACTIVE", 5000L),
+            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre(token == null ? "" : token),
             new CoordinationProperties.Limits(10_000),

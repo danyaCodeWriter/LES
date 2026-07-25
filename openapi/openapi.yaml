@@ -5,10 +5,13 @@ info:
   description: |
     REST + SSE поверх etcd. Публичный контракт — **две** семьи: **active-region** (короткие пути без
     `regionId` в URL) и **global** (`/v1/tenants/{tenant}/global/...`). Текущий logical active region
-    хранится **cluster-wide в etcd** (`GET`/`PUT /v1/active-region`); short-path API подставляют его сами.
-    Источник ключа в etcd: **RSS** (`coordination.rss.required=true`, SSE sync), иначе bootstrap из
-    `coordination.active-region.*` в yaml, либо runtime **`PUT /v1/active-region`** / gRPC `SetActiveRegion` (SRE).
-    Смена ключа → `ActiveRegionMonitor` (etcd watch) → SSE `GET .../stream/active-region`.
+    хранится **в etcd per-home**: `/coord/v1/cluster/regions/{home}/activeRegion`
+    (`home` = `coordination.active-region.home`). Pods r1 и r2 в общем etcd не затирают друг другу status.
+    Short-path API подставляют `activeRegion` из ключа своего home.
+    Источник ключа: **RSS** (`coordination.rss.required=true`), иначе bootstrap из
+    `coordination.active-region.*` в yaml, либо runtime **`PUT /v1/active-region`** / gRPC `SetActiveRegion` (SRE)
+    — пишет в ключ **этого** home.
+    Смена ключа → `ActiveRegionMonitor` (etcd watch своего home) → SSE `GET .../stream/active-region`.
 
     Динамическая спецификация: springdoc `/v3/api-docs`, UI `/swagger-ui.html`.
     gRPC: `proto/coordination/v1/coordination.proto` (`GetActiveRegion` / `SetActiveRegion`; остальные active-region RPC без `region_id`).
@@ -821,13 +824,17 @@ paths:
               properties:
                 region:
                   type: string
-                  description: Logical regionId для short-path (`.../regions/{region}/...`). Если опущено — предыдущий.
+                  description: |
+                    Cluster **activeRegion** to set (logical id for short-path etcd). Not the instance home.
+                    Home of this LES is config `coordination.active-region.home` (response field `region`).
+                    Если опущено — предыдущий activeRegion.
                 status:
                   type: string
                   enum: [ACTIVE, STANDBY, SWITCH]
                   description: |
-                    Режим деплоя кластера (не env). `STANDBY`/`SWITCH` — regional мутации **403**;
-                    `ACTIVE` — разрешены. Синонимы: stand-in, switch-over. Если опущено — предыдущий.
+                    Статус **с точки зрения home** этого LES (`coordination.active-region.home`).
+                    `STANDBY`/`SWITCH` — regional мутации **403**; `ACTIVE` — разрешены.
+                    Синонимы: stand-in, switch-over. Если опущено — предыдущий.
       responses:
         "200":
           content:
@@ -919,8 +926,8 @@ paths:
           description: |
             `text/event-stream`. Снапшот при подключении, затем событие на каждую смену
             region/status в etcd (в т.ч. когда RSS записал новый state, или после `PUT /v1/active-region`).
-            Поле `data` — JSON как у `GET .../active-region` (без `tenantId`): `region`, `status`,
-            `activeRegion`, `source`, drain-поля.
+            Поле `data` — JSON как у `GET .../active-region` (без `tenantId`): `region` (home этого LES),
+            `activeRegion` (кто serves), `status`, `source`, drain-поля.
           content:
             text/event-stream:
               schema:
@@ -1334,17 +1341,24 @@ components:
           type: string
         region:
           type: string
-          description: Текущий logical active region (тот же id, что подставляется в ключи etcd для short-path API).
+          description: |
+            Home-регион **этого** инстанса LES.
+            Источник: RSS `state.region` (если `rss.required=true`) либо seed
+            `coordination.active-region.home` / `coordination.rss.home-region`.
+            Не обязан совпадать с `activeRegion`.
         status:
           type: string
           enum: [active, stand_in, switch]
           description: |
-            Режим деплоя из etcd (`ACTIVE`→`active`, `STANDBY`→`stand_in`, `SWITCH`→`switch`).
-            Задаётся `PUT /v1/active-region` body.status (SRE) или bootstrap `coordination.active-region.status`.
-            На STANDBY/SWITCH regional мутации дают **403**; global разрешён. SWITCH участвует в REGION_DRAIN purge.
+            Статус **этого** LES (POV home): `active` только если `region`(home) == `activeRegion`.
+            Иначе `stand_in`. `switch` — маркер переключения из etcd/RSS.
+            Только на `active` разрешены regional jobs/coordinator/workers; на stand_in/switch — **403**.
+            Global API разрешён в обоих ЦОД.
         activeRegion:
           type: string
-          description: То же, что `region` (оставлено для обратной совместимости).
+          description: |
+            Кто сейчас serves кластер (ключ etcd; подставляется в short-path `.../regions/{activeRegion}/...`).
+            Может отличаться от `region` (home этого LES).
         source:
           type: string
           description: Источник снимка — `etcd`, `etcd-missing`, `initial` (bootstrap yaml → etcd на старте)

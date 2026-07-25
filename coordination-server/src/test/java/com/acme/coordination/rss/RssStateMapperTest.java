@@ -16,6 +16,7 @@ class RssStateMapperTest {
                 new RssStateEvent("r1", "r1", "active", false, 1L, 10L))
             .orElseThrow();
     Assertions.assertEquals("r1", active.regionId());
+    Assertions.assertEquals("r1", active.homeRegion());
     Assertions.assertEquals(DeploymentRole.ACTIVE, active.status());
 
     var standIn =
@@ -23,6 +24,7 @@ class RssStateMapperTest {
                 new RssStateEvent("r1", "r2", "stand_in", true, 2L, 11L))
             .orElseThrow();
     Assertions.assertEquals("r2", standIn.regionId());
+    Assertions.assertEquals("r1", standIn.homeRegion());
     Assertions.assertEquals(DeploymentRole.STANDBY, standIn.status());
 
     var sw =
@@ -38,6 +40,7 @@ class RssStateMapperTest {
         "{\"region\":\"r1\",\"activeRegion\":\"eu\",\"status\":\"active\",\"regionalWritesBlocked\":false,\"epoch\":1,\"revision\":5}";
     var mapped = RssStateMapper.parseStateData(mapper, json).orElseThrow();
     Assertions.assertEquals("eu", mapped.regionId());
+    Assertions.assertEquals("r1", mapped.homeRegion());
     Assertions.assertEquals(DeploymentRole.ACTIVE, mapped.status());
     Assertions.assertEquals(5L, mapped.revision());
   }

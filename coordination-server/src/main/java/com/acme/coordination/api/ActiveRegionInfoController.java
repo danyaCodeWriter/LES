@@ -33,9 +33,9 @@ public class ActiveRegionInfoController {
     var s = activeRegion.snapshot();
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("tenantId", tenantId);
-    m.put("region", s.regionId());
-    m.put("status", deployment.instanceStatusWire());
+    m.put("region", activeRegion.instanceHomeRegion());
     m.put("activeRegion", s.regionId());
+    m.put("status", deployment.instanceStatusWire());
     m.put("source", s.source());
     m.put("regionalWritesBlocked", drainPolicy.regionalWritesBlocked());
     m.put("drainingPreviousRegion", drainPolicy.drainingPreviousRegionId().orElse(null));

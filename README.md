@@ -41,7 +41,8 @@ mvn -f coordination-server/pom.xml spring-boot:run
 
 Сервер слушает порт `grpc.server.port` (по умолчанию **9090**), сервис `coordination.v1.Coordination`. Источник контракта: [`proto/coordination/v1/coordination.proto`](proto/coordination/v1/coordination.proto).
 
-Координатор active-region (логический регион подставляет сервер из etcd, ключ `/coord/v1/cluster/activeRegion`):
+Координатор active-region (логический сегмент подставляет сервер из etcd; POV этого LES —
+ключ `/coord/v1/cluster/regions/{home}/activeRegion`):
 
 ```bash
 grpcurl -plaintext -d '{"tenantId":"team-a","coordinatorId":"payments","instanceId":"pod-1","ttlSeconds":10,"metadata":{}}' \
@@ -85,7 +86,7 @@ grpcurl -plaintext -d '{"workerIds":["worker-a","worker-b"],"virtualNodes":128}'
 
 **Switchover active-region:** при смене **id** активного региона через **`PUT /v1/active-region`** (SRE token) сервер входит в фазу **drain**: в `GET /v1/active-region` (и в SSE) появляются `regionalWritesBlocked` и `drainingPreviousRegion`. Пока `regionalWritesBlocked` истинно, **active-region** lease-мутации (coordinator acquire/renew, worker register/heartbeat/deregister, job acquire/renew/release) возвращают **HTTP 409** с `REGION_DRAIN` (в gRPC: **FAILED_PRECONDITION**). Сервер снимает drain, когда в etcd под префиксом старого региона **нет** ключей, кроме **`coordinationEpoch`**. После этого клиенты снова могут acquire/register/job в новом сегменте.
 
-**Ускоренный drain (роль развёртывания `SWITCH`):** задайте `COORDINATION_DEPLOYMENT_ROLE=SWITCH` (или `switch-over`, опрос как у `ACTIVE`/`STANDBY`). Regional-мутации для клиентов по-прежнему **403** (как у STANDBY), но этот хост **участвует в drain** (поэтому `regionalWritesBlocked` может оставаться **true**, а **409** `REGION_DRAIN` действует, пока есть старые ключи). На каждом опросе drain сервер **удаляет** lease-ключи под префиксом draining-региона (лидер, воркеры, задачи) для **всех tenant**, оставляя **`coordinationEpoch`**. Используйте только когда операторы **остановили** все процессы, которые ещё держали эти lease; иначе возможно неконсистентное поведение клиентов. После завершения переключения верните роль в **`ACTIVE`**.
+**Ускоренный drain (`status=SWITCH` в etcd / RSS для home этого LES):** regional-мутации для клиентов по-прежнему **403** (как у `stand_in`), но этот хост **участвует в drain** (поэтому `regionalWritesBlocked` может оставаться **true**, а **409** `REGION_DRAIN` действует, пока есть старые ключи). На каждом опросе drain сервер **удаляет** lease-ключи под префиксом draining-региона (лидер, воркеры, задачи) для **всех tenant**, оставляя **`coordinationEpoch`**. Используйте только когда операторы **остановили** все процессы, которые ещё держали эти lease; иначе возможно неконсистентное поведение клиентов. После завершения переключения верните статус home в **`ACTIVE`** (RSS или `PUT /v1/active-region`).
 
 ## Java SDK (`coordination-client`)
 
@@ -99,7 +100,43 @@ grpcurl -plaintext -d '{"workerIds":["worker-a","worker-b"],"virtualNodes":128}'
 </dependency>
 ```
 
-Набросок использования:
+### Sessions (рекомендуется): auto-renew / heartbeat
+
+Пакет `com.acme.coordination.sdk.session`: `CoordinationSessions` + `holdCoordinator` / `holdWorker` / `holdJob` / `runExclusiveJob`.  
+`ApiScope.REGIONAL` — short-path (только при local LES `status=active`); `ApiScope.GLOBAL` — cross-DC exclusivity.  
+По умолчанию renew каждые **ttl/3**; `close()` останавливает цикл и для worker/job делает deregister/release.
+
+```java
+import com.acme.coordination.sdk.CoordinationRestClient;
+import com.acme.coordination.sdk.session.ApiScope;
+import com.acme.coordination.sdk.session.LeaseOptions;
+
+try (var rest = new CoordinationRestClient("http://localhost:8080");
+     var sessions = rest.sessions();
+     var worker = sessions.holdWorker(
+         "team-a", "worker-1", "pod-1", ApiScope.REGIONAL, LeaseOptions.ofTtlSeconds(30));
+     var job = sessions.holdJob(
+         "team-a", "pay-batch", worker.workerId(), worker.token(),
+         ApiScope.REGIONAL, LeaseOptions.ofTtlSeconds(30).withOnLost(ev ->
+             System.err.println("job lost: " + ev.reason() + " " + ev.detail())))) {
+  // exclusive work; renew в фоне
+}
+
+// one-shot (acquire → work → release):
+try (var rest = new CoordinationRestClient("http://localhost:8080");
+     var sessions = rest.sessions();
+     var worker = sessions.holdWorker(
+         "team-a", "worker-1", "pod-1", ApiScope.GLOBAL, LeaseOptions.ofTtlSeconds(30))) {
+  sessions.runExclusiveJob(
+      "team-a", "pay-batch", worker.workerId(), worker.token(),
+      ApiScope.GLOBAL, LeaseOptions.ofTtlSeconds(30),
+      () -> { /* work */ });
+}
+```
+
+### Low-level REST / gRPC
+
+Набросок без sessions (сами крутите renew):
 
 ```java
 // REST — JsonNode ответов (поля как в OpenAPI: token, ok, renewed, acquired, …)
@@ -209,28 +246,52 @@ mvn -f coordination-server/pom.xml spring-boot:run
 - Краткий чеклист запуска и список `demo-step-*` — подраздел **«Для разработчика»** выше; полный текст сценария и переменных — в **DEMO_PLAN_RU.md**.
 - [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) — `chmod +x scripts/demo-two-dc.sh` затем `./scripts/demo-two-dc.sh help`. Запуск двух инстансов из **корня репо**: `./scripts/demo-two-dc.sh run-active` и `run-standby` (JDK **21+**, `JAVA_HOME`, `mvn install` для `coordination-hash`, затем `spring-boot:run` по `coordination-server/pom.xml`); фон: `start-active-bg` / `start-standby-bg`, остановка: `stop-apps`. В **`active-flow`** после REST `rings/assign` вызывается **`grpcurl …/ComputeRanges`** на `GRPC_ACTIVE_ADDR` (по умолчанию `127.0.0.1:9090`), если `grpcurl` установлен.
 
+## Переезд: 1 ЦОД → 2 ЦОД (playbook клиента)
+
+Цель платформы — дать **один владелец** роли/job при появлении второго ЦОД, без самописного etcd в каждом сервисе.
+
+| Было (1 ЦОД) | Стало (2 ЦОД) |
+|--------------|---------------|
+| Один base URL coordination | Два LES (например r1 и r2) + **общий stretched etcd**; клиент ходит на **свой** DC или follow ACTIVE |
+| Один смысл «кто лидер / кто держит job» | **Regional** job — один владелец в **активном** сегменте; на stand_in — **403**. Критичное между ЦОД → **global** job/coordinator |
+| «Просто acquire» | После switch: ждать `regionalWritesBlocked=false`, затем **заново** register/acquire в новом сегменте |
+| Роль из env на JVM | Роль (**status**) — POV **home** этого LES из etcd/RSS; ответ `GET …/active-region`: `region`=home, `activeRegion`=кто serves, `status`=active\|stand_in\|switch |
+
+**Минимальный клиентский цикл:**
+
+1. `GET /v1/active-region` (или SSE) на том base URL, куда шлёте API.
+2. Если `status != active` — **не** делайте regional mutate (получите **403**); для cross-DC exclusivity используйте **`/global/...`**.
+3. Если `regionalWritesBlocked` — ждите конца drain (**409** `REGION_DRAIN` на regional lease).
+4. Выберите контур job: regional vs global (см. ниже).
+
+Подробнее: [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md) (§2 playbook, семантика job). Демо двух процессов: [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md).
+
 ## Поверхность API: active-region и global
 
 Публичный контракт делится на **две** семьи URL/gRPC (клиент **не передаёт** `regionId` в путях или в protobuf):
 
-1. **Active region** — короткие пути `/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/...` (кроме `stream/active-region`). Сервер сам подставляет **текущий active region** из **etcd** (cluster key `/coord/v1/cluster/activeRegion`; задаётся `PUT /v1/active-region` / gRPC `SetActiveRegion` с SRE-токеном).  
-   В etcd данные tenant лежат под `.../tenants/{tenant}/regions/{logicalId}/...`.
+1. **Active region (regional)** — короткие пути `/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/...` (кроме `stream/active-region`). Сервер подставляет **логический activeRegion** из **etcd** POV этого LES: ключ  
+   **`/coord/v1/cluster/regions/{home}/activeRegion`**  
+   (`home` = `coordination.active-region.home` или RSS `state.region`; задаётся RSS / yaml / `PUT /v1/active-region` / gRPC `SetActiveRegion` с SRE-токеном).  
+   Данные tenant: `.../tenants/{tenant}/regions/{activeRegion}/...`.
 
-   **Switchover:** подпишитесь на `GET /v1/tenants/{tenant}/stream/active-region` и следите за `regionalWritesBlocked`. Пока drain активен после смены id региона, новые acquire/register/job в active-region отклоняются (**409**). Когда `regionalWritesBlocked` стал **false**, заново зарегистрируйте coordinator/workers/jobs — короткие пути пишут в новый сегмент автоматически.
+   **Switchover:** подпишитесь на `GET /v1/tenants/{tenant}/stream/active-region` и следите за `regionalWritesBlocked`. Пока drain активен после смены id `activeRegion`, новые acquire/register/job в regional отклоняются (**409**). Когда `regionalWritesBlocked` стал **false**, заново зарегистрируйте coordinator/workers/jobs — короткие пути пишут в новый сегмент автоматически.
 
-2. **Global** — `/v1/tenants/{tenant}/global/...` (общий пул и один coordinator на tenant между ЦОД).
+2. **Global** — `/v1/tenants/{tenant}/global/...` (общий пул и один coordinator/jobs на tenant между ЦОД; **не** блокируется regional drain и **разрешён** на stand_in).
 
-### Роль развёртывания (ACTIVE, STANDBY, SWITCH)
+### Статус этого LES (ACTIVE / STANDBY / SWITCH)
 
-Статус **`ACTIVE` / `STANDBY` / `SWITCH`** хранится в etcd (вместе с logical `region`) и задаётся через
-**RSS** (master data, SSE) при `coordination.rss.required=true`, либо через yaml bootstrap /
-**`PUT /v1/active-region`** (SRE) когда RSS не обязателен.
-На старте JVM: если `rss.required=false` — в etcd пишутся `coordination.active-region.value` (**r1**) и
-`status` (**ACTIVE**); если `rss.required=true` — первый SSE `state` из RSS (иначе старт падает).
+В ответе `GET …/active-region`: **`region`** = home этого инстанса, **`activeRegion`** = кто сейчас serves short-path, **`status`** = POV home (`active` / `stand_in` / `switch`). Источник статуса — etcd (и RSS, если `coordination.rss.required=true`), **не** отдельный env `COORDINATION_DEPLOYMENT_ROLE`.
 
-- **`ACTIVE`** — regional + global мутации.
-- **`STANDBY`** — regional мутации **403**; global ок.
-- **`SWITCH`** — как STANDBY для клиентов + участие в REGION_DRAIN и ускоренный purge старых ключей.
+Старт JVM:
+
+- `rss.required=false` — в etcd пишутся yaml `active-region.home` / `value` / `status` (пустые → **r1** / **r1** / **ACTIVE**).
+- `rss.required=true` **без** yaml-стартеров (`home` пустой) — первые значения **только из RSS** (иначе старт падает); seed для первого `?region=` — `rss.home-region`.
+- `rss.required=true` **с** yaml-стартерами (`home` задан) — старт на yaml, дальше ждём RSS в фоне.
+
+- **`active`** — regional + global мутации.
+- **`stand_in`** — regional мутации **403**; global ок.
+- **`switch`** — как stand_in для клиентов + участие в REGION_DRAIN и ускоренный purge старых ключей.
 
 ```bash
 curl -sS -X PUT "$BASE/v1/active-region" \
@@ -238,6 +299,8 @@ curl -sS -X PUT "$BASE/v1/active-region" \
   -H 'content-type: application/json' \
   -d '{"region":"r1","status":"STANDBY"}'
 ```
+
+(`region` в теле PUT — это **activeRegion** для short-path; home LES не меняется этим полем.)
 
 ## Сквозной сценарий: как жить с сервисом (клиентское приложение)
 
@@ -301,19 +364,30 @@ gRPC `ComputeRanges`: то же поведение — поле `with_points: tr
 
 **Без SDK:** зависимость `coordination-hash`, классы `RingAssignment`, `RingIds`, `ConsistentHashRing` (тот же расчёт, что у сервера).
 
-### 5. Задачи / блокировки (опционально)
+### 5. Задачи / блокировки — семантика dual-DC
 
-`POST .../jobs/{jobId}:acquire` / `:renew` / `:release` — эксклюзив по `jobId` в текущем active region (или под `.../global/jobs/...`). В acquire: **`holder`** — `coordinatorId` активного лидера или **`workerId`** из register в этом контуре; **`participantToken`** — соответствующий токен acquire/register. В ответе при `acquired=true` — отдельный **`token`** лока для `:renew` и `:release`. Пока ключ в etcd существует, второй acquire на тот же `jobId` получит **HTTP 409** (`JOB_EXISTS`). Неверный участник — **403** (`JOB_PARTICIPANT_INVALID`), без токена — **400** (`JOB_PARTICIPANT_TOKEN_REQUIRED`).
+Один и тот же API (`:acquire` / `:renew` / `:release`), **два контура** с разным смыслом при двух ЦОД:
 
-**Список job воркера:** `GET /v1/tenants/{tenant}/workers/{workerId}/jobs` (active region) или `GET .../global/workers/{workerId}/jobs` — авторизация тем же **`token`**, что после `workers/register` (`Authorization: Bearer` или **`X-Worker-Token`**). В теле — только те job, у которых `holder` совпадает с `workerId`; секрет lock-token в JSON опущен.
+| | **Regional** `…/jobs/{jobId}:…` | **Global** `…/global/jobs/{jobId}:…` |
+|--|----------------------------------|--------------------------------------|
+| **Где ключ в etcd** | `…/regions/{activeRegion}/jobs/…` | `…/global/jobs/…` |
+| **Сколько владельцев** | Ровно один в **активном** логическом сегменте | Ровно один на **весь tenant** (оба ЦОД видят один ключ) |
+| **На LES со `status=stand_in` / `switch`** | Мутации **403** (`STANDBY_DEPLOYMENT` / `SWITCH_DEPLOYMENT`) | Разрешены (если участник зарегистрирован в **global** пуле) |
+| **Во время REGION_DRAIN** | **409** `REGION_DRAIN`, пока `regionalWritesBlocked` | **Не** блокируется drain’ом regional |
+| **После смены `activeRegion`** | Старый сегмент «умирает» по TTL/release; в новом — **новый** acquire | Владение **не** рвётся из‑за switchover, пока жив lease |
+| **Когда выбирать** | Работа только в «живом» ЦОД (batch в ACTIVE) | Exclusivity при переезде / active-active: один job на оба сайта |
+
+Общие правила acquire (оба контура): **`holder`** — `coordinatorId` лидера или **`workerId`** из register **в том же** контуре; **`participantToken`** — токен acquire/register. При успехе — отдельный **`token`** лока для `:renew` / `:release`. Второй acquire при живом ключе — **409** `JOB_EXISTS`. Неверный участник — **403** `JOB_PARTICIPANT_INVALID`; без токена — **400** `JOB_PARTICIPANT_TOKEN_REQUIRED`. TTL **10…300** с.
+
+**Список job воркера:** `GET …/workers/{workerId}/jobs` или `GET …/global/workers/{workerId}/jobs` — тот же **`token`**, что после register (`Authorization: Bearer` или **`X-Worker-Token`**). В теле только job с `holder` = этот `workerId`; lock-token в JSON опущен.
 
 ### 5b. Простые KV-ticket (global, без coordinator/worker/job)
 
 `PUT /v1/tenants/{tenant}/global/kv/{keyId}` с телом `{"value":<любой JSON>,"ttlSeconds":10}` — создание (если ключа ещё нет). Без `ttlSeconds` ключ **без lease** (пока не удалите). Ответ **201** содержит **`accessToken`** — сохраните; он же нужен для `GET` / `DELETE` / обновления (`Authorization: Bearer` или **`X-Kv-Access-Token`**). При обновлении без `ttlSeconds` в теле сохраняется прежний lease (если был). Конфликт ревизий — **409** `KV_REVISION_CONFLICT`. Ключ уже есть при первом create — **409** `KV_EXISTS`.
 
-### 6. STANDBY ЦОД
+### 6. Stand-in ЦОД
 
-Если инстанс с `COORDINATION_DEPLOYMENT_ROLE=STANDBY`, **не** вызывайте на нём acquire/register для active-region (получите 403). **GET** regional coordinator/workers/jobs без Bearer дадут **401**; с токеном лидера из etcd — как на ACTIVE. `POST /v1/rings/assign` без tenant — без изменений. **Global** чтения на STANDBY — с Bearer **global** coordinator token.
+Если `GET …/active-region` на этом base URL даёт **`status: stand_in`** (или `switch`), **не** вызывайте на нём regional acquire/register/job (получите **403**). **GET** regional coordinator/workers/jobs без Bearer — **401**; с токеном regional лидера из etcd — чтение как на ACTIVE. `POST /v1/rings/assign` без tenant — без изменений. **Global** мутации и чтения — ок (Bearer **global** coordinator token для чтений пула).
 
 ### 7. Наблюдение
 

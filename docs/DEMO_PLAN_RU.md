@@ -2,7 +2,20 @@
 
 Корень репо: каталог с `pom.xml`. Tenant по умолчанию: **`demo-team`**. Инфраструктура: [`scripts/demo-two-dc.sh`](../scripts/demo-two-dc.sh). Префикс в etcd: **`/coord/v1/tenants`**.
 
-Порты: **2379** etcd, **8099** Etcd UI, **8090** RSS mock, **8080** / **9090** ACTIVE, **8081** / **9091** STANDBY. Нужны **curl** и **jq**; для шага gRPC в happy path — **grpcurl** (опционально). Инфра: [`docker-compose.yml`](../docker-compose.yml) (`etcd` + `etcdkeeper` + `rss-mock`).
+Порты: **2379** etcd, **8099** Etcd UI, **8090** RSS mock, **8080** / **9090** ACTIVE (home **r1**), **8081** / **9091** stand_in (home **r2**). Нужны **curl** и **jq**; для шага gRPC в happy path — **grpcurl** (опционально). Инфра: [`docker-compose.yml`](../docker-compose.yml) (`etcd` + `etcdkeeper` + `rss-mock`).
+
+### Модель 2 ЦОД (что показать ведущему)
+
+| | ACTIVE `:8080` | stand_in `:8081` |
+|--|----------------|------------------|
+| Home LES (`GET …/active-region` → `region`) | обычно **r1** | обычно **r2** |
+| Regional coordinator / workers / **jobs** | ок при `status=active` | **403** `STANDBY_DEPLOYMENT` |
+| **Global** coordinator / workers / jobs | ок | ок |
+| etcd POV ключ | `/coord/v1/cluster/regions/{home}/activeRegion` | свой `{home}`, не общий |
+
+**Job dual-DC (сказать вслух):** regional job = один владелец в активном сегменте; на stand_in — 403; после switch — новый acquire. Нужна exclusivity на оба ЦОД → **`…/global/jobs/...`** (drain не рвёт). Полная таблица: [`PLATFORM_OVERVIEW_RU.md`](PLATFORM_OVERVIEW_RU.md) §5.3, [`README.md`](../README.md) §«Задачи / блокировки».
+
+**Playbook клиента:** `GET …/active-region` → если `status != active` не шлём regional mutate; если `regionalWritesBlocked` ждём drain; выбор regional vs global job.
 
 ### GET и токен координатора (что видно в логах)
 
@@ -52,9 +65,9 @@ export BASE_STANDBY=http://127.0.0.1:8081
 
 Для каждого шага в консоль выводятся: **какой метод/URL и тело запроса**; для **GET** к защищённым путям — **правило про Bearer** и строка **`Заголовок запроса: Authorization: Bearer <token>`** (или пометка, что заголовка нет, для публичного `active-region`); затем **HTTP-код и JSON ответа** → **краткое пояснение** → пауза `DEMO_STEP_PAUSE_SEC` → следующий шаг.
 
-Охват: `active-region`, coordinator acquire/renew/get (GET с `Authorization: Bearer` = token acquire), два воркера (register → heartbeat → ids/list с тем же Bearer), `rings/assign`, опционально **grpcurl ListWorkers** с `coordinatorReadToken`, job acquire (holder = workerId, `participantToken` из register) / renew / get, global coordinator acquire/get, job release, deregister обоих воркеров.
+Охват: `active-region` (`region`=home, `activeRegion`, `status`), coordinator acquire/renew/get (GET с `Authorization: Bearer` = token acquire), два воркера (register → heartbeat → ids/list с тем же Bearer), `rings/assign`, опционально **grpcurl ListWorkers** с `coordinatorReadToken`, **regional** job acquire (holder = workerId, `participantToken` из register) / renew / get, global coordinator acquire/get, job release, deregister обоих воркеров.
 
-Рекомендация: для предсказуемого `acquired=true` у coordinator используйте **новый `TENANT=...`** или чистый префикс в etcd; иначе предыдущий лидер может ещё держать lease.
+Рекомендация: для предсказуемого `acquired=true` у coordinator используйте **новый `TENANT=...`** или чистый префикс в etcd; иначе предыдущий лидер может ещё держать lease. Для демо «один job на оба ЦОД» добавьте отдельно `…/global/jobs/…:acquire` (см. §«Модель 2 ЦОД» выше).
 
 ### 1b) Job'ы воркера (GET …/jobs) + global KV ticket
 
@@ -102,26 +115,30 @@ export GLOBAL_SSE_BEARER='<token global coordinator acquire>'
 
 Остановка: **Ctrl+C** (обрывает оба `curl`). Аналог одной команды: `./scripts/demo-two-dc.sh sse-workers-active` (только workers).
 
-### 2) Конкуренция за job + неверный TTL
+### 2) Конкуренция за regional job + неверный TTL
 
 ```bash
 ./scripts/demo-step-job-lock-contention.sh
 ```
 
-- Сначала регистрируются два воркера; первый вызов **захватывает** job с их токенами.
+- Сначала регистрируются два воркера; первый вызов **захватывает** **regional** job с их токенами.
 - Второй — тот же `jobId`, другой валидный участник: ожидается **HTTP 409** (`JOB_EXISTS`, в теле — сообщение и часто `currentHolder`).
 - Затем запрос с **`ttlSeconds: 5`** (ниже минимума 10): ожидается **HTTP 400** (валидация).
 - В конце — **release** первым участником; затем **второй** с тем же `jobId` снова **acquire** (успех), **GET job** с Bearer coordinator, **release** вторым токеном лока.
 
-### 3) STANDBY (stand-in): regional запрещён, global разрешён
+Смысл для 2 ЦОД: этот сценарий — exclusivity **внутри активного сегмента**. На stand_in тот же regional acquire даст **403** (шаг 3); для exclusivity между ЦОД — global jobs (playbook в README / PLATFORM §5.3).
+
+### 3) stand_in: regional запрещён, global разрешён
 
 ```bash
 ./scripts/demo-step-standby-regional-denied.sh
 ```
 
-Проверяется, что на **8081** regional **coordinator / workers / jobs** дают **403** с телом **`STANDBY_DEPLOYMENT`** (смысл: вы вызываете active-region API, но процесс поднят как пассивный ЦОД в **r2** — мутации regional нужно слать на **ACTIVE**), а **global coordinator** — успешно. В JSON сценария в `metadata` указано **`region: "r2"`** (stand-in), не r1.
+Проверяется, что на **8081** regional **coordinator / workers / jobs** дают **403** с телом **`STANDBY_DEPLOYMENT`** (пассивный ЦОД, home обычно **r2**, `status=stand_in` — regional мутации шлите на **ACTIVE :8080**), а **global coordinator** — успешно. В JSON сценария в `metadata` часто указано **`region: "r2"`** (home stand_in), не r1.
 
-### 4) RSS mock: master data региона (active → switch → stand_in)
+Ведущему: «regional job здесь мёртв намеренно; если нужен один владелец на оба сайта — `…/global/jobs`».
+
+### 4) RSS mock: master data (active → switch → stand_in)
 
 Mock реализует контракт [`openapi/rss-api.yaml`](../openapi/rss-api.yaml) и крутит статусы каждые **`RSS_CYCLE_INTERVAL_SEC`** (по умолчанию **8** с).
 
@@ -139,7 +156,7 @@ Mock реализует контракт [`openapi/rss-api.yaml`](../openapi/rss
 ./scripts/demo-step-rss-sync.sh
 ```
 
-Скрипт показывает snapshot RSS (`/v1/debug/state`), затем `GET /v1/active-region` у LES и несколько раз поллит статус, пока mock проходит цикл **active → switch → stand_in**. Маппинг: `active`→ACTIVE, `stand_in`→STANDBY, `switch`→SWITCH; `activeRegion` из RSS → `region` в etcd.
+Скрипт показывает snapshot RSS (`/v1/debug/state`), затем `GET /v1/active-region` у LES и несколько раз поллит статус, пока mock проходит цикл **active → switch → stand_in**. Маппинг wire→внутренний: `active`→ACTIVE, `stand_in`→STANDBY, `switch`→SWITCH. В etcd пишется per-home ключ: RSS `activeRegion` → логический serves-id; RSS `region` → **home** LES; `status` — POV home. В ответе LES: `region`=home, `activeRegion`=serves, `status`=wire.
 
 Прямой SSE к mock (опционально):
 
@@ -155,7 +172,7 @@ curl -N "http://127.0.0.1:8090/v1/recovery-groups/demo-rg/active-region?region=r
 
 В [`scripts/demo-two-dc.sh`](../scripts/demo-two-dc.sh): `active-flow` (всё подряд), `switch-region`, `active-after-switch`, `standby-checks`, SSE и т.д. Перед защищёнными GET в лог печатается тот же блок про **Authorization: Bearer** и полный токен, что и в пошаговых скриптах. См. `./scripts/demo-two-dc.sh help`.
 
-**TTL** для coordinator / worker register / job acquire: **10–300** секунд. После **смены active region** смотрите **`regionalWritesBlocked`** в `GET …/active-region` (drain по TTL старого региона).
+**TTL** для coordinator / worker register / job acquire: **10–300** секунд. После **смены activeRegion** смотрите **`regionalWritesBlocked`** в `GET …/active-region` (drain по TTL старого сегмента). Regional jobs после switch — заново; global — lease живёт в `…/global/jobs/…`.
 
 ---
 
@@ -165,9 +182,10 @@ curl -N "http://127.0.0.1:8090/v1/recovery-groups/demo-rg/active-region?region=r
 |---------|----------|
 | Скрипт не стартует | `chmod +x scripts/demo-step-*.sh` |
 | Нет ответа от ACTIVE | `etcd-start`, `init-file`, `run-active`, проверка `curl -sS http://127.0.0.1:8080/actuator/health` |
-| `run-active-rss` падает на старте | `rss-start` / `infra-up`, проверка `curl -sS http://127.0.0.1:8090/health` |
-| Шаг STANDBY падает на health | Запустите `run-standby` на **8081** |
+| `run-active-rss` падает на старте | `rss-start` / `infra-up`, проверка `curl -sS http://127.0.0.1:8090/health`; без yaml `home` и без ответа RSS старт намеренно падает |
+| Шаг stand_in падает на health | Запустите `run-standby` на **8081** |
+| **HTTP 403** на regional job на 8081 | Ожидаемо (stand_in); для cross-DC — global jobs |
 | **HTTP 409** на первом шаге happy path (лидер / job / worker уже есть) | Другой tenant или дождаться TTL старого lease |
 | **HTTP 401** на `GET …/coordinator`, workers, jobs, SSE workers/jobs | Сначала **POST …/coordinator/acquire** в этом контуре, затем **`Authorization: Bearer <token>`** из ответа (в логах шага это печатается явно перед `curl`) |
 
-Подробности: [`README.md`](../README.md).
+Подробности: [`README.md`](../README.md), playbook и семантика job — [`PLATFORM_OVERVIEW_RU.md`](PLATFORM_OVERVIEW_RU.md).

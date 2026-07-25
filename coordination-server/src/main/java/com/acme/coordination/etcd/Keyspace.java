@@ -16,18 +16,23 @@ public final class Keyspace {
   }
 
   /**
-   * Cluster-wide logical active region (not under a tenant). For {@code rootPrefix}
-   * {@code /coord/v1/tenants} → {@code /coord/v1/cluster/activeRegion}.
+   * Per-home-region POV of active region (shared/stretched etcd).
+   * For {@code rootPrefix} {@code /coord/v1/tenants} and home {@code r1} →
+   * {@code /coord/v1/cluster/regions/r1/activeRegion}.
+   *
+   * <p>LES pods with {@code coordination.active-region.home=r1} read/write only this key;
+   * pods in {@code r2} use {@code .../regions/r2/activeRegion} — no status clash.
    */
-  public String clusterActiveRegionKey() {
-    String base;
+  public String clusterActiveRegionKey(String homeRegion) {
+    return clusterBase() + "/cluster/regions/" + sanitizeSegment(homeRegion) + "/activeRegion";
+  }
+
+  private String clusterBase() {
     if (rootPrefix.endsWith("/tenants")) {
-      base = rootPrefix.substring(0, rootPrefix.length() - "/tenants".length());
-    } else {
-      int slash = rootPrefix.lastIndexOf('/');
-      base = slash > 0 ? rootPrefix.substring(0, slash) : rootPrefix;
+      return rootPrefix.substring(0, rootPrefix.length() - "/tenants".length());
     }
-    return base + "/cluster/activeRegion";
+    int slash = rootPrefix.lastIndexOf('/');
+    return slash > 0 ? rootPrefix.substring(0, slash) : rootPrefix;
   }
 
   /** Prefix listing all tenant subtrees, e.g. {@code /coord/v1/tenants/}. */

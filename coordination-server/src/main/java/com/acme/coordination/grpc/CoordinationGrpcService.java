@@ -662,7 +662,8 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     var s = activeRegion.snapshot();
     ActiveRegionInfo.Builder b =
         ActiveRegionInfo.newBuilder()
-            .setRegionId(s.regionId())
+            .setRegionId(activeRegion.instanceHomeRegion())
+            .setActiveRegion(s.regionId())
             .setSource(s.source() == null ? "" : s.source())
             .setStatus(deployment.instanceStatusWire())
             .setRegionalWritesBlocked(drainPolicy.regionalWritesBlocked());

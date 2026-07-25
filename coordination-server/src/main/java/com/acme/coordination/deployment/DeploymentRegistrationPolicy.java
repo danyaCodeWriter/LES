@@ -7,7 +7,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * На {@link DeploymentRole#STANDBY} и {@link DeploymentRole#SWITCH} клиенты не должны вызывать regional
- * coordinator/workers/jobs. Global scope всегда разрешён. Роль берётся из etcd (cluster active-region status).
+ * coordinator/workers/jobs. Global scope всегда разрешён.
+ * Роль — status из etcd-ключа этого home ({@code .../cluster/regions/{home}/activeRegion}), POV RSS.
  */
 @Component
 public class DeploymentRegistrationPolicy {

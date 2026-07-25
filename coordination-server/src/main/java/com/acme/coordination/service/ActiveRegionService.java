@@ -8,6 +8,7 @@ import com.acme.coordination.codec.JsonCodec;
 import com.acme.coordination.deployment.DeploymentRole;
 import com.acme.coordination.etcd.Keyspace;
 import com.acme.coordination.region.ActiveRegionState;
+import com.acme.coordination.region.InstanceHomeRegion;
 import com.acme.coordination.security.SreTokenVerifier;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KV;
@@ -17,7 +18,10 @@ import java.util.concurrent.CompletableFuture;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
-/** Cluster-wide active region + deployment status in etcd. */
+/**
+ * Active region + POV status in etcd for <strong>this</strong> LES home region.
+ * Key: {@code /coord/v1/cluster/regions/{home}/activeRegion}.
+ */
 @Service
 public class ActiveRegionService {
 
@@ -25,16 +29,27 @@ public class ActiveRegionService {
   private final Keyspace keyspace;
   private final JsonCodec json;
   private final SreTokenVerifier sre;
+  private final InstanceHomeRegion instanceHome;
 
-  public ActiveRegionService(Client client, Keyspace keyspace, JsonCodec json, SreTokenVerifier sre) {
+  public ActiveRegionService(
+      Client client,
+      Keyspace keyspace,
+      JsonCodec json,
+      SreTokenVerifier sre,
+      InstanceHomeRegion instanceHome) {
     this.kv = client.getKVClient();
     this.keyspace = keyspace;
     this.json = json;
     this.sre = sre;
+    this.instanceHome = instanceHome;
+  }
+
+  private String homeKey() {
+    return keyspace.clusterActiveRegionKey(instanceHome.get());
   }
 
   public CompletableFuture<Optional<ActiveRegionState>> get() {
-    String key = keyspace.clusterActiveRegionKey();
+    String key = homeKey();
     return kv.get(bs(key))
         .thenApply(
             (GetResponse resp) -> {
@@ -46,16 +61,22 @@ public class ActiveRegionService {
             });
   }
 
-  /** Persist region and/or status. Null/blank keeps previous (or ACTIVE defaults). */
-  public CompletableFuture<ActiveRegionState> set(String regionId, String status) {
+  /**
+   * Persist activeRegion id and/or POV status for this LES home key.
+   * Null/blank keeps previous (or defaults).
+   */
+  public CompletableFuture<ActiveRegionState> set(String activeRegionId, String status) {
+    String key = homeKey();
     return get()
         .thenCompose(
             opt -> {
               try {
                 String rid =
-                    (regionId != null && !regionId.isBlank())
-                        ? normalizeRegionId(regionId)
-                        : opt.map(ActiveRegionState::regionId).filter(s -> s != null && !s.isBlank()).orElse("r1");
+                    (activeRegionId != null && !activeRegionId.isBlank())
+                        ? normalizeRegionId(activeRegionId)
+                        : opt.map(ActiveRegionState::regionId)
+                            .filter(s -> s != null && !s.isBlank())
+                            .orElse("r1");
                 DeploymentRole role;
                 if (status != null && !status.isBlank()) {
                   role = DeploymentRole.parse(status);
@@ -63,30 +84,32 @@ public class ActiveRegionService {
                   role = opt.map(ActiveRegionState::deploymentRole).orElse(DeploymentRole.ACTIVE);
                 }
                 ActiveRegionState state = ActiveRegionState.of(rid, role);
-                return kv.put(bs(keyspace.clusterActiveRegionKey()), bb(json.writeBytes(state)))
-                    .thenApply(ignored -> state);
+                return kv.put(bs(key), bb(json.writeBytes(state))).thenApply(ignored -> state);
               } catch (IllegalArgumentException | ParticipantException e) {
                 if (e instanceof ParticipantException pe) {
                   return CompletableFuture.failedFuture(pe);
                 }
                 return CompletableFuture.failedFuture(
-                    new ParticipantException(HttpStatus.BAD_REQUEST, "ACTIVE_REGION_STATUS_INVALID", e.getMessage()));
+                    new ParticipantException(
+                        HttpStatus.BAD_REQUEST, "ACTIVE_REGION_STATUS_INVALID", e.getMessage()));
               }
             });
   }
 
-  public CompletableFuture<ActiveRegionState> setWithSre(String regionId, String status, String sreCredential) {
+  public CompletableFuture<ActiveRegionState> setWithSre(
+      String activeRegionId, String status, String sreCredential) {
     try {
       sre.assertSre(sreCredential);
     } catch (ParticipantException e) {
       return CompletableFuture.failedFuture(e);
     }
-    return set(regionId, status);
+    return set(activeRegionId, status);
   }
 
   public static String normalizeRegionId(String regionId) {
     if (regionId == null || regionId.isBlank()) {
-      throw new ParticipantException(HttpStatus.BAD_REQUEST, "ACTIVE_REGION_REQUIRED", "region must be a non-empty string.");
+      throw new ParticipantException(
+          HttpStatus.BAD_REQUEST, "ACTIVE_REGION_REQUIRED", "region must be a non-empty string.");
     }
     String v = regionId.trim();
     if (v.contains("/") || v.contains("\u0000")) {

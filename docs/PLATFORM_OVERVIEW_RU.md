@@ -11,9 +11,17 @@
 
 | <span style="color:#5E4DB2;font-weight:600">Было (один активный ЦОД)</span> | <span style="color:#5E4DB2;font-weight:600">Стало (два ЦОД)</span> |
 |--------------------------|-----------------|
-| <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Один «активный» кластер приложений, глобально согласованное состояние локально очевидно</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Часть сервисов **active-active** (оба ЦОД обрабатывают трафик), часть **active-standby** (второй только резерв / чтение)</span> |
-| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Один смысл «кто лидер / кто владеет задачей»</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Риск **двух владельцев** одной и той же роли или задачи без общего хранилища согласования</span> |
+| <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Один «активный» кластер приложений, глобально согласованное состояние локально очевидно</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Два LES (home **r1** / **r2**) + **общий stretched etcd**; один ЦОД **active**, второй **stand_in**</span> |
+| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Один base URL и один смысл «кто лидер / кто владеет задачей»</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Клиент ходит на свой DC или follow ACTIVE; regional mutate только при `status=active`; cross-DC exclusivity → **global**</span> |
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Редко нужен явный fencing к внешним системам</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">После split-brain или lag сети **старый** процесс может ещё писать в БД/очередь — нужны **epoch / lease** и политика отказа</span> |
+| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">«Просто acquire» после рестарта</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">После смены `activeRegion`: ждать `regionalWritesBlocked=false`, затем **заново** register/acquire в новом сегменте</span> |
+
+### <span style="color:#216E4E">Playbook клиента (минимум)</span>
+
+1. `GET /v1/active-region` (или SSE) на том base URL, куда шлёте API. Поля: **`region`** = home этого LES, **`activeRegion`** = кто serves short-path, **`status`** = POV home (`active` / `stand_in` / `switch`).
+2. Если `status != active` — **не** делайте regional mutate (**403**). Для «один job на оба ЦОД» используйте **`/global/jobs/...`**.
+3. Если `regionalWritesBlocked` — ждите конца drain (**409** `REGION_DRAIN` на regional lease).
+4. Выберите контур job: **regional** vs **global** (см. §5.3).
 
 Платформа **не заменяет** БД и очереди, но даёт **согласованные примитивы** поверх **etcd**: lease + CAS + durable epoch, единый API для команд, мигрирующих с «один DC — один смысл active».
 
@@ -30,7 +38,7 @@
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Job-lock</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">**:acquire** проверяет, что `holder` — известный coordinator **или** зарегистрированный worker, и **`participantToken`** совпадает с секретом этого участника; отдельный **job `token`** на renew/release</span> |
 | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Чтение пулов</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">GET coordinator / workers / jobs (списки и один job), SSE workers/jobs — с **токеном чтения** лидера coordinator (**Bearer** или `X-Coordinator-Token`). **GET одного job** дополнительно: **токен регистрации worker-holder** (Bearer или `X-Worker-Token`)</span> |
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Смена active region</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">**Drain**: `regionalWritesBlocked` в `GET …/active-region` и SSE; пока drain активен — **409 REGION_DRAIN** на regional мутации; после очистки lease-ключей старого региона (кроме `coordinationEpoch`) — запись в новый сегмент</span> |
-| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">STANDBY / SWITCH</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Роль деплоя: regional мутации **403** на пассивном инстансе; **global** мутации разрешены. **SWITCH** — участие в принудительной очистке draining-сегмента (операторская осторожность)</span> |
+| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">STANDBY / SWITCH</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`status` в etcd POV **home** этого LES (`stand_in` / `switch`): regional мутации **403**; **global** разрешены. **SWITCH** — участие в принудительной очистке draining-сегмента (операторская осторожность)</span> |
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Идемпотентность REST</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">При `coordination.idempotency.enabled=true`: заголовок `Idempotency-Key` / `X-Idempotency-Key` на allowlist-операциях; повтор с тем же ключом, методом, путём и телом — **повтор ответа** (200/201/409) из etcd-кэша до TTL. Для `PUT …/global/kv/{keyId}` в отпечаток входят заголовки доступа к KV, чтобы create/replace не пересекались</span> |
 
 Ограничение: **gRPC идемпотентность заголовком** в текущей версии **не** дублирует REST.
@@ -41,10 +49,12 @@
 
 **Целевая картина:**
 
-- **Два инстанса приложения** coordination-server: например **DC1 (r1)** и **DC2 (r2)** — разные `COORDINATION_DEPLOYMENT_ROLE` / файлы роли (**ACTIVE** в «живом» ЦОД для regional-мутаций, **STANDBY** в резервном), один и тот же логический **tenant**.
-- **etcd кластер на три ЦОД** (например узлы в **r0, r1, r2**): выносливость к потере одного сайта; **кворум** и latency между узлами — предмет SRE (RTT влияет на commit).
+- **Два инстанса** coordination-server (LES): **DC1 home=r1** и **DC2 home=r2**, общий tenant, **общий stretched etcd**.
+- У каждого LES свой ключ POV: **`/coord/v1/cluster/regions/{home}/activeRegion`** (r1 и r2 **не** перезаписывают статус друг друга). В значении: логический **`activeRegion`** (кто serves) + **`status`** (POV этого home).
+- Роль (**active** / **stand_in** / **switch**) приходит из **RSS** (`rss.required=true`) или yaml / **`PUT /v1/active-region`** (SRE). Это **не** отдельный env `COORDINATION_DEPLOYMENT_ROLE`.
+- **etcd на несколько ЦОД** (например узлы в r0/r1/r2): выносливость к потере сайта; кворум и RTT — предмет SRE.
 
-**Локальный стенд:** часто один etcd на `127.0.0.1:2379` и два процесса Spring на разных портах (например **8080** и **8081**) с разными ролями деплоя; смена active region — через **`PUT /v1/active-region`** с SRE-токеном (значение в etcd, ключ `/coord/v1/cluster/activeRegion`).
+**Локальный стенд:** один etcd на `127.0.0.1:2379` и два Spring (**8080** home=r1 ACTIVE, **8081** home=r2 stand_in); смена — RSS mock или **`PUT /v1/active-region`**. См. [`DEMO_PLAN_RU.md`](DEMO_PLAN_RU.md).
 
 В проде те же **пути URL и семантика**, меняется топология etcd и сетевые политики.
 
@@ -56,7 +66,7 @@
 
 | <span style="color:#5E4DB2;font-weight:600">Семья</span> | <span style="color:#5E4DB2;font-weight:600">Путь (REST)</span> | <span style="color:#5E4DB2;font-weight:600">etcd (логически)</span> | <span style="color:#5E4DB2;font-weight:600">Назначение</span> |
 |-------|-------------|------------------|------------|
-| <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">**Active region**</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/workers`, `/stream/jobs`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`.../tenants/{tenant}/regions/{logicalRegion}/...`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Пул в **текущем** active region; `regionId` в URL **не** передаётся — сервер подставляет из конфига</span> |
+| <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">**Active region**</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`/v1/tenants/{tenant}/coordinator`, `/workers`, `/jobs`, `/stream/workers`, `/stream/jobs`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`.../tenants/{tenant}/regions/{activeRegion}/...`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Пул в **текущем** `activeRegion`; `regionId` в URL **не** передаётся — сервер подставляет из etcd POV **home**</span> |
 | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">**Global**</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`/v1/tenants/{tenant}/global/...`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`.../tenants/{tenant}/global/...`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Один global coordinator и общий пул workers/jobs/**kv** между ЦОД</span> |
 
 Публичный снимок без секретов: **`GET …/active-region`**. SSE: **`…/stream/active-region`**.
@@ -68,11 +78,26 @@
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Regional coordinator</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`POST …/coordinator/acquire`, `…/renew`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`GET …/coordinator` (Bearer / X-Coordinator-Token)</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Отпуск lease = перестать renew</span> |
 | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Global coordinator</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`POST …/global/coordinator/acquire`, `…/renew`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`GET …/global/coordinator`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">То же</span> |
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Worker (regional / global)</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`POST …/workers/register`, `…/heartbeat`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`GET …/workers/ids`, `GET …/workers`, `GET …/workers/{id}/jobs` (**X-Worker-Token**)</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`…/deregister`</span> |
-| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Job-lock</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`POST …/jobs/{id}:acquire`, `:renew`, `:release`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`GET …/jobs/{id}` (coordinator **или** token holder-worker)</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`:release` с job token</span> |
+| <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Job-lock (regional / global)</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`POST …/jobs/{id}:acquire` или `…/global/jobs/{id}:…`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`GET …/jobs/{id}` (coordinator **или** token holder-worker)</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`:release` с job token</span> |
 | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">Global KV (ticket)</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`PUT …/global/kv/{keyId}`</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">`GET`/`DELETE` с **accessToken** из ответа PUT</span> | <span style="background-color:#E3FCEF;padding:2px 6px;border-radius:4px">DELETE</span> |
 | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Ring</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">`POST /v1/rings/assign`</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">Чистое вычисление, без tenant pool в etcd</span> | <span style="background-color:#F4F5F7;padding:2px 6px;border-radius:4px">—</span> |
 
 **TTL** lease для coordinator / worker / job (acquire/register): **10…300** с (единый контракт REST и gRPC).
+
+### <span style="color:#216E4E">5.3. Семантика job под dual-DC</span>
+
+Один API (`:acquire` / `:renew` / `:release`), **два контура**:
+
+| | <span style="color:#5E4DB2;font-weight:600">Regional</span> `…/jobs/{jobId}` | <span style="color:#5E4DB2;font-weight:600">Global</span> `…/global/jobs/{jobId}` |
+|--|----------------------------------|--------------------------------------|
+| Ключ etcd | `…/regions/{activeRegion}/jobs/…` | `…/global/jobs/…` |
+| Сколько владельцев | Ровно один в **активном** логическом сегменте | Ровно один на **весь tenant** (оба ЦОД) |
+| LES `status=stand_in` / `switch` | Мутации **403** | Разрешены (участник из **global** пула) |
+| REGION_DRAIN | **409** пока `regionalWritesBlocked` | **Не** блокируется |
+| После смены `activeRegion` | Нужен **новый** acquire в новом сегменте | Lease **не** рвётся из‑за switchover |
+| Когда выбирать | Работа только в «живом» ЦОД | Exclusivity при переезде / оба сайта |
+
+Общее: `holder` + `participantToken` из **того же** контура; отдельный job `token` на renew/release; второй acquire при живом ключе — **409** `JOB_EXISTS`.
 
 ---
 
@@ -80,17 +105,18 @@
 
 ### <span style="color:#216E4E">Визуализация: кто откуда узнаёт регион и роль инстанса</span>
 
-Pod вызывает `GET /v1/tenants/{tenant}/active-region` без `Authorization` и получает JSON с полями `region`, `status`, `regionalWritesBlocked` и др. (схема **ActiveRegionInfo** в OpenAPI).
+Pod вызывает `GET /v1/tenants/{tenant}/active-region` без `Authorization` и получает JSON с полями `region` (home), `activeRegion`, `status`, `regionalWritesBlocked` и др. (схема **ActiveRegionInfo** в OpenAPI).
 
 ```
-  [Pod]  --GET .../active-region (no Bearer)-->  [Coordination-server]
+  [Pod]  --GET .../active-region (no Bearer)-->  [LES / coordination-server]
                                                       |
                                                       v
-                                            { region, status, ... }
+                                { region=home, activeRegion, status, ... }
                                                       |
                                                       v
                                                   [Pod решает:
-                                                   писать в regional API или нет,
+                                                   regional vs global job,
+                                                   писать ли regional API,
                                                    ждать ли drain]
 ```
 
@@ -137,14 +163,16 @@ Pod вызывает `GET /v1/tenants/{tenant}/active-region` без `Authorizat
 
 ---
 
-### <span style="color:#216E4E">UC-4. Global coordinator + global jobs (два ЦОД, общая очередь)</span>
+### <span style="color:#216E4E">UC-4. Global coordinator + global jobs (два ЦОД, общая exclusivity)</span>
 
-**Ситуация:** задачи должны жить в **общем** пуле между DC; regional drain не должен блокировать приём задач в global.
+**Ситуация:** нужен **ровно один** владелец задачи на оба ЦОД; regional drain/switchover не должен рвать владение.
 
 **Шаги:**  
-1) `POST …/global/coordinator/acquire` на любом инстансе с ролью, где global разрешён (и ACTIVE, и STANDBY).  
+1) `POST …/global/coordinator/acquire` на любом LES (и ACTIVE, и stand_in).  
 2) Регистрация `POST …/global/workers/register`, job `POST …/global/jobs/{id}:acquire` с global participant token.  
 3) Чтения с `GET …/global/...` и токеном **global** лидера.
+
+**Не путать с regional job:** `…/jobs/{id}` на stand_in даст **403**; после смены `activeRegion` regional lock в старом сегменте протухнет по TTL — для cross-DC выбирайте **global** (см. §5.3).
 
 **Выигрыш:** один кодовый путь для «между ЦОД», отдельный от regional drain/switchover.
 
@@ -152,29 +180,29 @@ Pod вызывает `GET /v1/tenants/{tenant}/active-region` без `Authorizat
 
 ### <span style="color:#216E4E">UC-5. Смена active region (active-standby по сегменту etcd)</span>
 
-**Ситуация:** команда переключает «логический» активный регион с **r1** на **r2** (файл/env на серверах + согласованный rollout приложений).
+**Ситуация:** команда / RSS переключает логический **`activeRegion`** с **r1** на **r2**; LES в каждом DC обновляют свой per-home ключ.
 
 **Шаги:**  
-1) Подписчики на `GET …/stream/active-region` (или поллинг `GET …/active-region`) видят **`regionalWritesBlocked: true`**.  
-2) Новые `coordinator/workers/jobs` по **коротким** путям получают **409 REGION_DRAIN**.  
-3) После TTL старых lease и отсутствия ключей (кроме `coordinationEpoch`) в старом префиксе — `regionalWritesBlocked: false`.  
-4) Клиенты **заново** acquire/register/job в новом сегменте (те же URL).
+1) Подписчики на `GET …/stream/active-region` (или поллинг) видят **`regionalWritesBlocked: true`**.  
+2) Новые regional `coordinator/workers/jobs` получают **409 REGION_DRAIN**.  
+3) После TTL старых lease (кроме `coordinationEpoch`) — `regionalWritesBlocked: false`.  
+4) Клиенты **заново** acquire/register/job в новом сегменте (те же short URL). **Global** jobs при этом можно не трогать.
 
-**Выигрыш:** предсказуемый контракт «сначала drain, потом запись» без ручного удаления ключей (кроме режима **SWITCH** для аварийного ускорения — описан в README репозитория).
+**Выигрыш:** предсказуемый контракт «сначала drain, потом запись» (кроме аварийного **SWITCH** purge — README).
 
 ---
 
-### <span style="color:#216E4E">UC-6. Пассивный ЦОД (STANDBY): чтение и global, без regional мутаций</span>
+### <span style="color:#216E4E">UC-6. Пассивный ЦОД (stand_in): чтение и global, без regional мутаций</span>
 
-**Ситуация:** во втором DC поднят тот же бинарь для теплого резерва и observability.
+**Ситуация:** во втором DC поднят тот же бинарь (home=r2) для теплого резерва.
 
 **Шаги:**  
-1) `COORDINATION_DEPLOYMENT_ROLE=STANDBY` на инстансе в DC2.  
-2) `GET …/active-region`, SSE active-region — **да**.  
-3) `POST …/coordinator/acquire`, `workers/register`, `jobs/...:acquire` — **403 STANDBY_DEPLOYMENT**.  
+1) У LES в DC2 в etcd POV `status=stand_in` (RSS или SRE PUT).  
+2) `GET …/active-region`, SSE — **да** (`region`=r2, `activeRegion` часто r1, `status`=stand_in).  
+3) `POST …/coordinator/acquire`, `workers/register`, `jobs/...:acquire` — **403** `STANDBY_DEPLOYMENT`.  
 4) `POST …/global/coordinator/acquire` и global worker/job — **да**.
 
-**Выигрыш:** один артефакт деплоя, две роли; меньше ошибок «случайно пишем в DC2».
+**Выигрыш:** один артефакт деплоя; меньше ошибок «случайно пишем regional в DC2».
 
 ---
 
@@ -222,23 +250,24 @@ Pod вызывает `GET /v1/tenants/{tenant}/active-region` без `Authorizat
 
 ---
 
-### <span style="color:#216E4E">UC-11. Любой под: «в каком я логическом регионе» и «можно ли мне слать regional-мутации на этот endpoint»</span>
+### <span style="color:#216E4E">UC-11. Любой под: «в каком я home», «кто activeRegion», «можно ли regional-мутации»</span>
 
-**Ситуация:** после переезда в 2 DC приложение крутится в нескольких кластерах; нужно **без секретов** понять: какой **логический active region** сейчас подставляет сервер в short-path (`…/coordinator`, `…/workers`, `…/jobs`), не идёт ли **drain** после switchover, и в каком **режиме деплоя** живёт **именно тот** инстанс coordination-server, на который указывает URL.
+**Ситуация:** после переезда в 2 DC нужно **без секретов** понять: home этого LES, кто сейчас serves short-path, идёт ли drain, и можно ли писать regional на **этот** base URL.
 
 **Шаги:**  
-1) Под (или sidecar) вызывает **`GET /v1/tenants/{tenant}/active-region`** на **том** базовом URL coordination, который использует для API (тот же хост, что для `…/workers/register` и т.д.). Заголовок **Authorization не нужен** (публичный снимок конфигурации).  
-2) Разбор JSON (схема **ActiveRegionInfo** в OpenAPI):  
-   - **`region`** / **`activeRegion`** — id логического сегмента в etcd для **коротких** путей active-region (тот же id, что в ключах `.../regions/{id}/...`).  
-   - **`status`** — **`active`** | **`stand_in`** | **`switch`**: роль **этого** процесса coordination-server (поллинг `deployment.role-file` → env → конфиг). От этого зависят **403** на regional мутации для `stand_in` и правила **SWITCH** (описание ролей — в README репозитория).  
-   - **`regionalWritesBlocked`**, **`drainingPreviousRegion`** — идёт ли **REGION_DRAIN**: пока `true`, acquire/register/job по short-path получают **409**.  
-   - **`source`** — откуда взяли значение региона (file / env / fallback) — удобно для отладки «почему не тот region».
+1) **`GET /v1/tenants/{tenant}/active-region`** (или `/v1/active-region`) на том base URL, куда шлёте API. **Authorization не нужен**.  
+2) Разбор JSON (**ActiveRegionInfo** в OpenAPI):  
+   - **`region`** — **home** этого LES (yaml / RSS `state.region`).  
+   - **`activeRegion`** — логический сегмент для short-path (`…/regions/{activeRegion}/…`).  
+   - **`status`** — **`active`** | **`stand_in`** | **`switch`**: POV home из **etcd** (RSS или SRE). От этого — **403** на regional при `stand_in`/`switch`.  
+   - **`regionalWritesBlocked`**, **`drainingPreviousRegion`** — REGION_DRAIN; пока `true` — regional acquire/register/job → **409**.  
+   - **`source`** — `etcd` / `etcd-missing` / `initial` (отладка).
 
-3) Опционально: **`GET …/stream/active-region`** (SSE) — те же поля в событиях `data:` без polling.
+3) Опционально: **`GET …/stream/active-region`** (SSE).
 
-**Нюанс:** если за балансировщиком несколько реплик coordination с **разными** ролями, клиент должен либо ходить на **известный** ACTIVE base URL для мутаций, либо полагаться на L7-маршрутизацию. Снимок `active-region` всегда отражает **тот инстанс**, который ответил.
+**Нюанс:** за балансировщиком несколько LES с разными home — снимок всегда про **тот** инстанс, который ответил. Regional mutate шлите на LES с `status=active` (или используйте global).
 
-**Выигрыш:** единый контракт для init-containers, readiness и бизнес-логики («сейчас мы в сегменте `r2` и drain ещё идёт — не шлём acquire»).
+**Выигрыш:** единый контракт для init/readiness и бизнес-логики («мы stand_in — только global» / «drain — не шлём acquire»).
 
 ---
 
@@ -358,7 +387,7 @@ curl -sS "{BASE}/v1/tenants/{TENANT}/active-region"
 }
 ```
 
-Убедиться, что `regionalWritesBlocked` приемлем для записи; запомнить `region`, `status`.
+Убедиться, что `status=active` и `regionalWritesBlocked` приемлем для regional записи; запомнить `region` (home), `activeRegion`.
 
 2) **Regional coordinator: acquire и renew.**
 

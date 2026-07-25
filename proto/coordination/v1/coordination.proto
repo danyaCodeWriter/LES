@@ -303,14 +303,18 @@ message Ranges {
 message GetActiveRegionRequest {}
 
 message ActiveRegionInfo {
+  // Home region of this LES instance (config coordination.active-region.home).
   string region_id = 1;
   string source = 2;
   string status = 3;
   bool regional_writes_blocked = 4;
   string draining_previous_region = 5;
+  // Cluster active region (may differ from region_id when this instance is stand_in).
+  string active_region = 6;
 }
 
 message SetActiveRegionRequest {
+  // Cluster active region to set (not the instance home).
   string region_id = 1;
   // coordination.sre.stream-listen-token (same as HTTP PUT /v1/active-region).
   string access_credential = 2;

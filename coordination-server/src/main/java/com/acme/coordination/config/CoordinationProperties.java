@@ -16,13 +16,40 @@ public record CoordinationProperties(
     Rss rss
 ) {
   public CoordinationProperties {
-    activeRegion = activeRegion == null ? new ActiveRegion("r1", "ACTIVE", 5000L) : activeRegion;
+    activeRegion = activeRegion == null ? new ActiveRegion("", "r1", "ACTIVE", 5000L) : activeRegion;
     idempotency = idempotency == null
         ? new Idempotency(false, 86400, 128, 262_144)
         : idempotency;
     sre = sre == null ? new Sre("") : sre;
     limits = limits == null ? new Limits(10_000) : limits;
-    rss = rss == null ? new Rss(false, "", "", "r1", Duration.ofSeconds(30)) : rss;
+    rss = rss == null ? new Rss(false, "", "", "", Duration.ofSeconds(30)) : rss;
+  }
+
+  /**
+   * Config-only home seed (yaml). Prefer {@link com.acme.coordination.region.InstanceHomeRegion}
+   * at runtime (may be filled from RSS).
+   */
+  public String instanceHomeRegion() {
+    String home = activeRegion.homeRegion();
+    if (home != null && !home.isBlank()) {
+      return home;
+    }
+    String rssHome = rss.homeRegion();
+    if (rssHome != null && !rssHome.isBlank()) {
+      return rssHome;
+    }
+    // yaml mode (rss.required=false): blank → r1; RSS mode leaves blank until InstanceHomeRegion/RSS
+    return rss.required() ? "" : "r1";
+  }
+
+  /**
+   * Explicit yaml starters for home/activeRegion/status ({@code active-region.home} set).
+   * When {@code rss.required=true} and this is true — LES may start on yaml and wait for RSS.
+   * When false — first values must come from RSS or the process must not become operational.
+   */
+  public boolean hasYamlActiveRegionStarters() {
+    String home = activeRegion.home();
+    return home != null && !home.isBlank();
   }
 
   public record Etcd(
@@ -102,15 +129,30 @@ public record CoordinationProperties(
   }
 
   /**
-   * Local bootstrap when {@code coordination.rss.required=false}.
-   * When RSS is required, these are ignored for bootstrap (RSS is master data).
+   * Yaml bootstrap for active-region.
+   *
+   * <ul>
+   *   <li>{@code rss.required=false}: always used (blank fields → home via {@code InstanceHomeRegion}
+   *       default {@code r1}, value {@code r1}, status {@code ACTIVE}).
+   *   <li>{@code rss.required=true}: used only when {@link CoordinationProperties#hasYamlActiveRegionStarters()}
+   *       — temporary starters while waiting for RSS; otherwise first values must come from RSS.
+   * </ul>
+   *
+   * @param home this LES home; blank → {@code r1} if RSS off, else seed/{@code state.region}
+   * @param value bootstrap {@code activeRegion}; blank → {@code r1}
+   * @param status bootstrap POV status; blank → {@code ACTIVE}
    */
-  public record ActiveRegion(String value, String status, Long pollIntervalMs) {
+  public record ActiveRegion(String home, String value, String status, Long pollIntervalMs) {
     public ActiveRegion {
       if (value == null || value.isBlank()) {
         value = "r1";
       } else {
         value = value.trim();
+      }
+      if (home == null) {
+        home = "";
+      } else {
+        home = home.trim();
       }
       if (status == null || status.isBlank()) {
         status = "ACTIVE";
@@ -120,6 +162,10 @@ public record CoordinationProperties(
       if (pollIntervalMs == null || pollIntervalMs <= 0) {
         pollIntervalMs = 5000L;
       }
+    }
+
+    public String homeRegion() {
+      return home;
     }
 
     public String bootstrapRegionId() {
@@ -170,8 +216,8 @@ public record CoordinationProperties(
       } else {
         recoveryGroup = recoveryGroup.trim();
       }
-      if (homeRegion == null || homeRegion.isBlank()) {
-        homeRegion = "r1";
+      if (homeRegion == null) {
+        homeRegion = "";
       } else {
         homeRegion = homeRegion.trim();
       }
