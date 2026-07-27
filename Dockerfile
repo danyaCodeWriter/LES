@@ -15,17 +15,19 @@
 #   docker run --rm -p 8080:8080 -p 9090:9090 -p 2379:2379 coordination-server:with-etcd
 #   # или: docker compose --profile with-etcd up -d --build coordination-with-etcd
 #
-FROM maven:3.9.9-eclipse-temurin-21 AS build
+FROM eclipse-temurin:21-jdk-jammy AS build
 WORKDIR /build
 
-COPY pom.xml .
+COPY gradlew settings.gradle.kts build.gradle.kts gradle.properties ./
+COPY gradle ./gradle
 COPY coordination-hash ./coordination-hash
 COPY coordination-server ./coordination-server
 COPY coordination-client ./coordination-client
 COPY proto ./proto
 COPY openapi ./openapi
 
-RUN mvn -B -DskipTests package -pl coordination-server -am
+RUN chmod +x gradlew \
+  && ./gradlew :coordination-server:bootJar -x test --no-daemon
 
 FROM eclipse-temurin:21-jre-jammy AS runtime
 WORKDIR /app
@@ -33,7 +35,7 @@ WORKDIR /app
 RUN groupadd --system --gid 1000 coordination \
   && useradd --system --uid 1000 --gid coordination --home /app --shell /usr/sbin/nologin coordination
 
-COPY --from=build /build/coordination-server/target/coordination-server-*.jar /app/app.jar
+COPY --from=build /build/coordination-server/build/libs/coordination-server-*.jar /app/app.jar
 RUN chown coordination:coordination /app/app.jar
 
 USER coordination:coordination

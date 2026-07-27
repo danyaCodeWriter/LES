@@ -1,4 +1,6 @@
 target/
+**/build/
+.gradle/
 coordination-server/target/
 coordination-client/target/
 .idea/

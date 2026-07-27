@@ -10,17 +10,16 @@
 ## Сборка
 
 ```bash
-mvn test
+./gradlew test
 ```
 
-Запуск **только** сервера (из корня репо: сначала положите `coordination-hash` в `~/.m2`, затем запускайте Spring **только** из модуля сервера — команда `mvn -pl coordination-server -am spring-boot:run` **от агрегирующего** `pom.xml` сначала дергает плагин на корневом `pom` и падает):
+Запуск сервера из корня репозитория (multi-project Gradle сам подтянет `:coordination-hash`):
 
 ```bash
-mvn -q -pl coordination-hash install -DskipTests
-mvn -f coordination-server/pom.xml spring-boot:run
+./gradlew :coordination-server:bootRun
 ```
 
-Или используйте **`./scripts/demo-two-dc.sh run-active`** — он делает то же самое. Из корня репозитория `mvn test` или `mvn install` собирают все модули.
+Или используйте **`./scripts/demo-two-dc.sh run-active`** — он делает то же самое. Из корня `./gradlew test` или `./gradlew build` собирают все модули.
 
 ## OpenAPI и Swagger UI
 
@@ -90,7 +89,13 @@ grpcurl -plaintext -d '{"workerIds":["worker-a","worker-b"],"virtualNodes":128}'
 
 ## Java SDK (`coordination-client`)
 
-Зависимость (после `mvn install`):
+Зависимость (Gradle multi-project или после `./gradlew :coordination-client:publishToMavenLocal`):
+
+```kotlin
+implementation("com.acme:coordination-client:0.1.0-SNAPSHOT")
+// или в этом репо:
+implementation(project(":coordination-client"))
+```
 
 ```xml
 <dependency>
@@ -183,7 +188,7 @@ try (var grpc = new CoordinationGrpcClient("localhost", 9090)) {
 
 **Docker обязателен** для типичного локального цикла: **etcd**, **etcdkeeper** и (для RSS-демо) **rss-mock** поднимаются через [`docker-compose.yml`](docker-compose.yml) / [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) (`etcd-start`, `rss-start`, `infra-up`). Без Docker daemon команды `etcd-start` / `etcd-verify` не смогут стартовать кластер; Spring по умолчанию ждёт etcd по [`coordination-server/src/main/resources/application.yml`](coordination-server/src/main/resources/application.yml) — `http://127.0.0.1:2379` (при другом адресе задайте `coordination.etcd.endpoints` или соответствующие переменные окружения).
 
-**Быстрый старт одного ACTIVE** (из **корня репозитория**, JDK **21+**, `JAVA_HOME`, `mvn` в `PATH`):
+**Быстрый старт одного ACTIVE** (из **корня репозитория**, JDK **21+**, `JAVA_HOME`, `./gradlew`):
 
 ```bash
 chmod +x scripts/demo-two-dc.sh scripts/demo-step-*.sh
@@ -213,11 +218,10 @@ docker compose --profile with-etcd up -d --build coordination-with-etcd
 # HTTP :8080, gRPC :9090, etcd с хоста :12379 (внутри контейнера app → 127.0.0.1:2379)
 ```
 
-Тот же сервер **без** `run-active` (если уже собран `coordination-hash`):
+Тот же сервер **без** `run-active`:
 
 ```bash
-mvn -q -pl coordination-hash install -DskipTests
-mvn -f coordination-server/pom.xml spring-boot:run
+./gradlew :coordination-server:bootRun
 ```
 
 Справка по всем командам демо-оркестратора: `./scripts/demo-two-dc.sh help` (два инстанса: `run-active` / `run-standby`, фон: `start-active-bg` / `start-standby-bg`, остановка: `stop-apps`, сценарий `active-flow` и т.д.).
@@ -244,7 +248,7 @@ mvn -f coordination-server/pom.xml spring-boot:run
 - Пошаговый сценарий для ведущего (что сказать, какие терминалы): [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md)
 - Обзор для Confluence / пресейла (гарантии, API, **use-cases**, 2 ЦОД + etcd): [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md)
 - Краткий чеклист запуска и список `demo-step-*` — подраздел **«Для разработчика»** выше; полный текст сценария и переменных — в **DEMO_PLAN_RU.md**.
-- [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) — `chmod +x scripts/demo-two-dc.sh` затем `./scripts/demo-two-dc.sh help`. Запуск двух инстансов из **корня репо**: `./scripts/demo-two-dc.sh run-active` и `run-standby` (JDK **21+**, `JAVA_HOME`, `mvn install` для `coordination-hash`, затем `spring-boot:run` по `coordination-server/pom.xml`); фон: `start-active-bg` / `start-standby-bg`, остановка: `stop-apps`. В **`active-flow`** после REST `rings/assign` вызывается **`grpcurl …/ComputeRanges`** на `GRPC_ACTIVE_ADDR` (по умолчанию `127.0.0.1:9090`), если `grpcurl` установлен.
+- [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) — `chmod +x scripts/demo-two-dc.sh` затем `./scripts/demo-two-dc.sh help`. Запуск двух инстансов из **корня репо**: `./scripts/demo-two-dc.sh run-active` и `run-standby` (JDK **21+**, `JAVA_HOME`, `./gradlew :coordination-server:bootRun`); фон: `start-active-bg` / `start-standby-bg`, остановка: `stop-apps`. В **`active-flow`** после REST `rings/assign` вызывается **`grpcurl …/ComputeRanges`** на `GRPC_ACTIVE_ADDR` (по умолчанию `127.0.0.1:9090`), если `grpcurl` установлен.
 
 ## Переезд: 1 ЦОД → 2 ЦОД (playbook клиента)
 

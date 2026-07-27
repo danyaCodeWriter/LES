@@ -1,6 +1,6 @@
 # Демо coordination (план по терминалам)
 
-Корень репо: каталог с `pom.xml`. Tenant по умолчанию: **`demo-team`**. Инфраструктура: [`scripts/demo-two-dc.sh`](../scripts/demo-two-dc.sh). Префикс в etcd: **`/coord/v1/tenants`**.
+Корень репо: каталог с `settings.gradle.kts` / `gradlew`. Tenant по умолчанию: **`demo-team`**. Инфраструктура: [`scripts/demo-two-dc.sh`](../scripts/demo-two-dc.sh). Префикс в etcd: **`/coord/v1/tenants`**.
 
 Порты: **2379** etcd, **8099** Etcd UI, **8090** RSS mock, **8080** / **9090** ACTIVE (home **r1**), **8081** / **9091** stand_in (home **r2**). Нужны **curl** и **jq**; для шага gRPC в happy path — **grpcurl** (опционально). Инфра: [`docker-compose.yml`](../docker-compose.yml) (`etcd` + `etcdkeeper` + `rss-mock`).
 
@@ -31,7 +31,7 @@
 |----------|------------|
 | **T0** | `cd <корень-репо>` → `./scripts/demo-two-dc.sh etcd-start` → `./scripts/demo-two-dc.sh init-file` |
 | **T0 (RSS)** | Для шага RSS: ещё `./scripts/demo-two-dc.sh rss-start` (или сразу `infra-up`) |
-| **T1** | Из **корня репо**: `./scripts/demo-two-dc.sh run-active` — оставить до конца демо (**Ctrl+C** остановит процесс). Нужен **JDK 21+**; скрипт ставит `coordination-hash` в `~/.m2` и запускает `spring-boot:run` по `coordination-server/pom.xml` (не через корневой `pom.xml` + `-pl`, иначе Maven сначала бьёт в aggregator). Для RSS-демо: **`run-active-rss`**. |
+| **T1** | Из **корня репо**: `./scripts/demo-two-dc.sh run-active` — оставить до конца демо (**Ctrl+C** остановит процесс). Нужен **JDK 21+**; скрипт запускает `./gradlew :coordination-server:bootRun`. Для RSS-демо: **`run-active-rss`**. |
 | **T2** | `./scripts/demo-two-dc.sh run-standby` — так же (второй терминал) |
 | **T3** | Пошаговые сценарии (happy path, workers+KV, bench, job lock, standby, **RSS** — см. ниже) |
 | **T4** | (опционально) **SSE** workers + jobs параллельно с T3: `scripts/demo-step-sse-workers-jobs.sh` (нужен `COORD_SSE_BEARER`, см. §1d) |

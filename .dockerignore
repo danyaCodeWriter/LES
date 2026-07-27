@@ -1,7 +1,9 @@
-# Сборочный контекст — только нужное для `mvn package -pl coordination-server -am`
+# Сборочный контекст — только нужное для `./gradlew :coordination-server:bootJar`
 .git
 .cursor
 **/target/
+**/build/
+**/.gradle/
 **/.classpath
 **/.project
 **/.settings/

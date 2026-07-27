@@ -68,8 +68,8 @@ need_docker() {
   command -v docker >/dev/null 2>&1 || die "docker not found"
 }
 
-need_mvn() {
-  command -v mvn >/dev/null 2>&1 || die "mvn not found (install Apache Maven or use SDKMAN)"
+need_gradle() {
+  [[ -x "$ROOT/gradlew" ]] || die "gradlew not found in $ROOT (Gradle wrapper)"
 }
 
 # Выставляет JAVA_HOME, если пустой: macOS — /usr/libexec/java_home; иначе — java -XshowSettings.
@@ -90,7 +90,7 @@ ensure_java_home() {
     done
     if jh="$(/usr/libexec/java_home -v 17 2>/dev/null)"; then
       export JAVA_HOME="$jh"
-      echo "JAVA_HOME=$JAVA_HOME (macOS, Java 17 — для этого репо нужен 21+, см. ошибку при mvn)"
+      echo "JAVA_HOME=$JAVA_HOME (macOS, Java 17 — для этого репо нужен 21+, см. ошибку при gradlew)"
       return 0
     fi
     jh="$(/usr/libexec/java_home 2>/dev/null)" || true
@@ -116,9 +116,9 @@ ensure_java_home() {
   die "JAVA_HOME не задан и не удалось определить JDK; установите JDK 21 и выполните: export JAVA_HOME=/path/to/jdk"
 }
 
-# Перед запуском Spring: mvn на PATH, JDK 21+, репозиторий в ROOT.
-prepare_maven_spring_run() {
-  need_mvn
+# Перед запуском Spring: Gradle wrapper, JDK 21+, репозиторий в ROOT.
+prepare_gradle_spring_run() {
+  need_gradle
   ensure_java_home
   export PATH="$JAVA_HOME/bin:$PATH"
   local jline tmp jmajor=0
@@ -141,13 +141,7 @@ prepare_maven_spring_run() {
   cd "$ROOT" || die "cannot cd to $ROOT"
 }
 
-# coordination-server зависит от coordination-hash; при запуске по server/pom.xml sibling не в реакторе — ставим jar в ~/.m2.
-install_coordination_hash_local() {
-  mvn -q -f "$ROOT/pom.xml" -pl coordination-hash install -DskipTests
-}
-
-# Spring Boot accepts comma- or space-separated args, but Maven splits -D values on comma,
-# so use spaces here or server.port becomes "8081,--grpc..." and the app fails to start.
+# Spring Boot accepts comma- or space-separated args; keep spaces for bootRun --args.
 spring_run_args_active() {
   echo "--coordination.active-region.poll-interval-ms=2000"
 }
@@ -243,7 +237,7 @@ cmd_help() {
   sse-active-region Поток SSE с ACTIVE (блокирует терминал)
   sse-workers-active Поток workers с ACTIVE (блокирует)
   java-home         Показать/выставить JAVA_HOME и выйти (для отладки)
-  run-active        Запуск coordination-server в ACTIVE (foreground; JDK 21+; hash install + mvn -f coordination-server/pom.xml spring-boot:run)
+  run-active        Запуск coordination-server в ACTIVE (foreground; JDK 21+; ./gradlew :coordination-server:bootRun)
   run-active-rss    То же ACTIVE, но coordination.rss.required=true → bootstrap/sync из RSS mock
   run-standby       Запуск в STANDBY на :8081 / gRPC :9091 (foreground)
   start-active-bg   То же ACTIVE в фоне (лог $SPRING_ACTIVE_LOG, pid $SPRING_ACTIVE_PID_FILE)
@@ -270,7 +264,7 @@ Active region (cluster etcd key /coord/v1/cluster/activeRegion):
   Вариант A — два терминала (удобно для логов на экране):
     Терминал 1: $(basename "$0") run-active
     Терминал 2: $(basename "$0") run-standby
-    (скрипт cd в $ROOT, JAVA_HOME 21+, install coordination-hash, затем spring-boot:run по coordination-server/pom.xml)
+    (скрипт cd в $ROOT, JAVA_HOME 21+, ./gradlew :coordination-server:bootRun)
 
   Вариант B — оба в фоне из одного терминала:
     $(basename "$0") start-active-bg && $(basename "$0") start-standby-bg
@@ -676,34 +670,28 @@ cmd_java_home() {
 }
 
 cmd_run_active() {
-  prepare_maven_spring_run
-  install_coordination_hash_local
+  prepare_gradle_spring_run
   echo "Starting primary :8080 (Ctrl+C to stop). Repo: $ROOT"
-  exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-    -Dspring-boot.run.arguments="$(spring_run_args_active)"
+  exec "$ROOT/gradlew" :coordination-server:bootRun --args="$(spring_run_args_active)"
 }
 
 cmd_run_active_rss() {
-  prepare_maven_spring_run
-  install_coordination_hash_local
+  prepare_gradle_spring_run
   if ! curl -sfS --max-time 3 "$RSS_BASE/health" >/dev/null 2>&1; then
     die "RSS mock недоступен ($RSS_BASE/health). Сначала: $0 rss-start (или $0 infra-up)"
   fi
   echo "Starting primary :8080 with RSS required=true → $RSS_BASE (RG=$RSS_RECOVERY_GROUP home=$RSS_HOME_REGION)"
-  exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-    -Dspring-boot.run.arguments="$(spring_run_args_active_rss)"
+  exec "$ROOT/gradlew" :coordination-server:bootRun --args="$(spring_run_args_active_rss)"
 }
 
 cmd_run_standby() {
-  prepare_maven_spring_run
-  install_coordination_hash_local
+  prepare_gradle_spring_run
   echo "Starting second instance :8081 gRPC :9091 (same etcd; no separate deployment role). Repo: $ROOT"
-  exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-    -Dspring-boot.run.arguments="$(spring_run_args_standby)"
+  exec "$ROOT/gradlew" :coordination-server:bootRun --args="$(spring_run_args_standby)"
 }
 
 cmd_start_active_bg() {
-  prepare_maven_spring_run
+  prepare_gradle_spring_run
   if [[ -f "$SPRING_ACTIVE_PID_FILE" ]] && kill -0 "$(cat "$SPRING_ACTIVE_PID_FILE")" 2>/dev/null; then
     die "ACTIVE уже запущен (pid $(cat "$SPRING_ACTIVE_PID_FILE")); сначала: $0 stop-apps"
   fi
@@ -714,16 +702,14 @@ cmd_start_active_bg() {
     bash -c '
       set -euo pipefail
       cd "$ROOT"
-      mvn -q -f "$ROOT/pom.xml" -pl coordination-hash install -DskipTests
-      exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-        -Dspring-boot.run.arguments="--coordination.active-region.poll-interval-ms=2000"
+      exec ./gradlew :coordination-server:bootRun --args="--coordination.active-region.poll-interval-ms=2000"
     ' >"$SPRING_ACTIVE_LOG" 2>&1 &
   echo $! >"$SPRING_ACTIVE_PID_FILE"
   echo "Primary Spring Boot в фоне, pid=$(cat "$SPRING_ACTIVE_PID_FILE"), лог: $SPRING_ACTIVE_LOG"
 }
 
 cmd_start_active_rss_bg() {
-  prepare_maven_spring_run
+  prepare_gradle_spring_run
   if [[ -f "$SPRING_ACTIVE_PID_FILE" ]] && kill -0 "$(cat "$SPRING_ACTIVE_PID_FILE")" 2>/dev/null; then
     die "ACTIVE уже запущен (pid $(cat "$SPRING_ACTIVE_PID_FILE")); сначала: $0 stop-apps"
   fi
@@ -740,16 +726,14 @@ cmd_start_active_rss_bg() {
     bash -c '
       set -euo pipefail
       cd "$ROOT"
-      mvn -q -f "$ROOT/pom.xml" -pl coordination-hash install -DskipTests
-      exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-        -Dspring-boot.run.arguments="$RSS_ARGS"
+      exec ./gradlew :coordination-server:bootRun --args="$RSS_ARGS"
     ' >"$SPRING_ACTIVE_LOG" 2>&1 &
   echo $! >"$SPRING_ACTIVE_PID_FILE"
   echo "Primary+RSS Spring Boot в фоне, pid=$(cat "$SPRING_ACTIVE_PID_FILE"), лог: $SPRING_ACTIVE_LOG"
 }
 
 cmd_start_standby_bg() {
-  prepare_maven_spring_run
+  prepare_gradle_spring_run
   if [[ -f "$SPRING_STANDBY_PID_FILE" ]] && kill -0 "$(cat "$SPRING_STANDBY_PID_FILE")" 2>/dev/null; then
     die "STANDBY уже запущен (pid $(cat "$SPRING_STANDBY_PID_FILE")); сначала: $0 stop-apps"
   fi
@@ -760,9 +744,7 @@ cmd_start_standby_bg() {
     bash -c '
       set -euo pipefail
       cd "$ROOT"
-      mvn -q -f "$ROOT/pom.xml" -pl coordination-hash install -DskipTests
-      exec mvn -f "$ROOT/coordination-server/pom.xml" spring-boot:run \
-        -Dspring-boot.run.arguments="--server.port=8081 --grpc.server.port=9091 --coordination.active-region.poll-interval-ms=2000"
+      exec ./gradlew :coordination-server:bootRun --args="--server.port=8081 --grpc.server.port=9091 --coordination.active-region.poll-interval-ms=2000"
     ' >"$SPRING_STANDBY_LOG" 2>&1 &
   echo $! >"$SPRING_STANDBY_PID_FILE"
   echo "Second instance Spring Boot в фоне, pid=$(cat "$SPRING_STANDBY_PID_FILE"), лог: $SPRING_STANDBY_LOG"
