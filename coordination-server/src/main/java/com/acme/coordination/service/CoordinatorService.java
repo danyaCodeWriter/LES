@@ -263,6 +263,39 @@ public class CoordinatorService {
     });
   }
 
+  /** Explicit release: delete leader key when {@code token} matches (faster than waiting for TTL). */
+  public CompletableFuture<Boolean> releaseIfHolder(String tenantId, String regionId, String token) {
+    return releaseIfHolderByLeaderKey(keyspace.leaderKey(tenantId, regionId), token);
+  }
+
+  public CompletableFuture<Boolean> releaseGlobalIfHolder(String tenantId, String token) {
+    return releaseIfHolderByLeaderKey(keyspace.globalLeaderKey(tenantId), token);
+  }
+
+  private CompletableFuture<Boolean> releaseIfHolderByLeaderKey(String leaderKey, String token) {
+    if (token == null || token.isBlank()) {
+      return CompletableFuture.completedFuture(false);
+    }
+    return kv.get(bs(leaderKey))
+        .thenCompose(
+            resp -> {
+              if (resp.getKvs().isEmpty()) {
+                return CompletableFuture.completedFuture(false);
+              }
+              var kvp = resp.getKvs().getFirst();
+              CoordinatorRecord rec = json.read(kvp.getValue().getBytes(), CoordinatorRecord.class);
+              if (rec.token() == null || rec.token().isBlank() || !token.equals(rec.token())) {
+                return CompletableFuture.completedFuture(false);
+              }
+              long leaseId = kvp.getLease();
+              CompletableFuture<?> revoke =
+                  leaseId == 0
+                      ? CompletableFuture.completedFuture(null)
+                      : lease.revoke(leaseId).handle((r, e) -> null);
+              return revoke.thenCompose(v -> kv.delete(bs(leaderKey)).thenApply(del -> del.getDeleted() > 0));
+            });
+  }
+
   public CompletableFuture<Map<String, CoordinatorState>> listCoordinatorsAllRegions(String tenantId) {
     String prefix = keyspace.regionsPrefix(tenantId);
     return kv.get(bs(prefix), GetOption.newBuilder().isPrefix(true).build()).thenApply(resp -> {

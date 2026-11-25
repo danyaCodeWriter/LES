@@ -40,8 +40,11 @@ public class GlobalJobsController {
       @Valid @RequestBody JobAcquireRequest req
   ) {
     Map<String, String> md = req.metadata() != null ? req.metadata() : Map.of();
-    return jobParticipants
-        .verifyGlobal(tenantId, req.holder(), req.participantToken())
+    CompletableFuture<Void> gate =
+        req.hasParticipant()
+            ? jobParticipants.verifyGlobal(tenantId, req.holder(), req.participantToken())
+            : CompletableFuture.completedFuture(null);
+    return gate
         .thenCompose(v -> jobs.acquireGlobal(tenantId, jobId, req.holder(), req.ttlSeconds(), md))
         .thenApply(ApiConflicts::requireNewJobLock);
   }

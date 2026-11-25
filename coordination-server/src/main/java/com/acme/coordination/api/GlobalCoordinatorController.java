@@ -57,4 +57,10 @@ public class GlobalCoordinatorController {
     return coordinator.renewGlobalIfHolder(tenantId, req.token())
         .thenApply(ok -> Map.of("renewed", ok));
   }
+
+  @PostMapping("/release")
+  public CompletableFuture<Map<String, Object>> release(
+      @PathVariable String tenantId, @Valid @RequestBody CoordinatorRenewRequest req) {
+    return coordinator.releaseGlobalIfHolder(tenantId, req.token()).thenApply(ok -> Map.of("released", ok));
+  }
 }

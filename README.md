@@ -102,10 +102,21 @@ implementation(project(":coordination-client"))
 </dependency>
 ```
 
+### LesClient (продуктовый фасад)
+
+Пакет `com.acme.coordination.sdk.les`: `LesClient.connect(url).sreToken(...).viaRss(rssUrl, recoveryGroup).drainTenant(t).build()`.
+
+- Freestanding lock: `les.tenant(t).global().lock("job").tryRun(() -> …)` (без worker).
+- JobQ: `becomeLeader` / `joinWorker` / `hashRing`.
+- Drain после RSS flip: client-only `viaRss` + `drainTenant` (сервер LES **не** знает RSS).
+- `flags()` / OpsWatch / `MonitoringSse` — см. `scripts/samples/les-client-sketch.md`.
+
+**Freestanding job на сервере:** `participantToken` опционален. **Drain:** `POST /v1/tenants/{t}/regions/{regionId}:drain` (Bearer SRE token).
+
 ### Sessions (рекомендуется): auto-renew / heartbeat
 
 Пакет `com.acme.coordination.sdk.session`: `CoordinationSessions` + `holdCoordinator` / `holdWorker` / `holdJob` / `runExclusiveJob`.  
-`ApiScope.REGIONAL` — short-path (только при local LES `status=active`); `ApiScope.GLOBAL` — cross-DC exclusivity.  
+`ApiScope.REGIONAL` — short-path etcd segment `COORDINATION_REGION`; `ApiScope.GLOBAL` — cross-DC exclusivity.  
 По умолчанию renew каждые **ttl/3**; `close()` останавливает цикл и для worker/job делает deregister/release.
 
 ```java

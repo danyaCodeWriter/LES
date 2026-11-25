@@ -1,0 +1,214 @@
+openapi: 3.0.3
+info:
+  title: Region State Service API
+  description: |
+    rss-api streams the active-region state of a Recovery Group to application
+    SDKs as Server-Sent Events (SSE): an initial snapshot, then live state
+    updates, interleaved with heartbeats. State is sourced by watching the
+    RegionRoleBinding object of the Recovery Group in the RCP apiserver.
+
+    Contract: the client SDK contract (sdk/docs/docs/rss/rss-sdk-interface.md)
+    and rfc-03.
+
+    ## SSE framing (not fully expressible in OpenAPI)
+
+    The 200 response is a `text/event-stream`. Each event is a block of lines
+    terminated by a blank line:
+
+        event: state
+        id: <opaque cursor>
+        data: <StateEvent json>
+
+        event: heartbeat
+        data: <HeartbeatEvent json>
+
+    - `id` appears on `state` events only and is an **opaque cursor**: clients
+      copy it verbatim and must never parse, compare or order it.
+    - `heartbeat` frames carry **no `id` line at all** — deliberately absent, not
+      empty. A heartbeat holds no position in the stream and must not move the
+      cursor, and per the SSE spec an empty `id` would reset the client's last
+      event ID while an absent one leaves it intact.
+    - Clients must ignore unknown event types and unknown payload fields.
+
+    ## Reconnect / resume
+
+    On reconnect the client sends its last cursor as `from_cursor` (query, wins)
+    or the standard `Last-Event-ID` header. The server decides:
+      - no cursor, or one that is not applicable -> full snapshot `state` event, then watch
+      - applicable cursor                        -> immediate `heartbeat` confirming the resume, then any states missed since it as ordinary `state` events, then watch
+    A cursor is not applicable when it is undecodable, belongs to another storage
+    generation (the Recovery Group was recreated), is ahead of the current
+    revision, or has been compacted away. None of these is a client error: all
+    fall back to a snapshot. A cursor whose revision was compacted may still be
+    accepted here, but the watch then fails with 410 and the server recovers by
+    emitting a fresh snapshot `state` event. Applicability is decided entirely by
+    the server (fail-safe: when in doubt, full snapshot); the client sends
+    neither epoch nor revision.
+  version: "1.0.0"
+paths:
+  /v1/recovery-groups/{recoveryGroup}/active-region:
+    get:
+      summary: Stream the active-region state of a Recovery Group as SSE.
+      operationId: streamActiveRegion
+      parameters:
+        - name: recoveryGroup
+          in: path
+          required: true
+          description: Logical Recovery Group name; matches the RegionRoleBinding object name.
+          schema:
+            type: string
+            minLength: 1
+        - name: region
+          in: query
+          required: true
+          description: The application instance's home region; the stream is rendered from its point of view.
+          schema:
+            type: string
+            minLength: 1
+        - name: from_cursor
+          in: query
+          required: false
+          description: |
+            Resume cursor: the `id` of the last received `state` event, copied
+            verbatim. Takes precedence over the Last-Event-ID header when both
+            are present. An undecodable or inapplicable value is not an error —
+            the server opens with a full snapshot instead.
+          schema:
+            type: string
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Standard SSE resume cursor; used when from_cursor is absent.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: SSE stream opened. See the description for the frame format.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: text/event-stream; charset=utf-8
+          content:
+            text/event-stream:
+              schema:
+                description: |
+                  Concatenated SSE frames. Payloads are one of the referenced
+                  schemas depending on the event type.
+                oneOf:
+                  - $ref: '#/components/schemas/StateEvent'
+                  - $ref: '#/components/schemas/HeartbeatEvent'
+        '400':
+          description: Unknown region or unknown Recovery Group. Do not retry. (A malformed cursor is not an error — see Reconnect / resume.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: |
+            RSS cannot confirm current state (e.g. etcd quorum loss). Retryable;
+            a sustained 503 drives the SDK to stale-state via its connect timeout.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal error. Retryable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway. Retryable.
+        '504':
+          description: Gateway timeout. Retryable.
+components:
+  schemas:
+    StateEvent:
+      type: object
+      description: Payload of a `state` SSE event.
+      required:
+        - region
+        - activeRegion
+        - role
+        - phase
+        - isStale
+        - epoch
+        - revision
+      properties:
+        region:
+          type: string
+          description: The application instance's local region (echoes the query param).
+        activeRegion:
+          type: string
+          description: The region currently serving the Recovery Group.
+        role:
+          $ref: '#/components/schemas/RegionRole'
+        phase:
+          $ref: '#/components/schemas/SwitchPhase'
+        isStale:
+          type: boolean
+          description: |
+            The server cannot vouch for this state (etcd quorum loss, storage
+            error). `true` makes the SDK stale immediately, without waiting for
+            its confirmation timeout; only a later `state` with `false` clears
+            it. The SDK grants write authority on
+            `activeRegion == region && phase == stable && !stale`, where stale is
+            this flag OR its own `RSS_STALE_TIMEOUT_SECONDS` running out.
+            rss-api sets `true` when the apiserver stops handing out watches or
+            snapshots: the last state is republished with the flag, heartbeats
+            go on (the connection is alive), and recovery is a fresh snapshot
+            with `false`. Before the stream opens the same condition is a 503.
+        epoch:
+          type: integer
+          format: int64
+          description: Generation of RG authority (rfc-03); bumped on each switchover.
+        revision:
+          type: integer
+          format: int64
+          description: State revision in the source. Observability only — it is not the cursor and must not be used as a resume point.
+    HeartbeatEvent:
+      type: object
+      description: |
+        Payload of a `heartbeat` SSE event. Says only that the connection is
+        alive (and, as the first frame after a resume, that the cursor was
+        accepted); it is sent even while the last `state` carries
+        `isStale: true`. Freshness lives in `state.isStale` alone.
+      required:
+        - epoch
+        - revision
+      properties:
+        epoch:
+          type: integer
+          format: int64
+          description: Generation of RG authority.
+        revision:
+          type: integer
+          format: int64
+          description: Revision of the last confirmed state. Observability only.
+    RegionRole:
+      type: string
+      description: |
+        Role of the local region in the Recovery Group. Source: `roles` in the
+        RegionRoleBinding. Informational — for logs, diagnostics and health
+        endpoints; the mutation decision is `activeRegion == region`, `phase`
+        and the stale flag.
+      enum:
+        - active
+        - stand_in
+    SwitchPhase:
+      type: string
+      description: |
+        Phase of the switch operation for the Recovery Group. Source: `state` in
+        the RegionRoleBinding. `switch` revokes write authority in every region,
+        including the active one.
+      enum:
+        - stable
+        - switch
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
