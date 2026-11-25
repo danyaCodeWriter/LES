@@ -30,35 +30,13 @@ coordination:
       key-path: ""       # client key (PEM, unencrypted)
       authority: ""      # optional SNI / gRPC authority override
   apiKey: ""
+  # Etcd segment for regional short-path APIs (env COORDINATION_REGION). Clients choose regional vs global.
+  region: r1
   idempotency:
     enabled: true
     ttl-seconds: 86400
     max-header-length: 128
     max-body-bytes: 262144
-  # When rss.required=false: home / value / status from yaml → etcd on startup.
-  # Blank fields default to home=r1, value=r1, status=ACTIVE.
-  #
-  # When rss.required=true:
-  #   - home set (yaml starters) → start on yaml home/value/status, wait for RSS in background.
-  #   - home empty → first values MUST come from RSS (fail startup if RSS unavailable).
-  #     For the first SSE ?region= set rss.home-region as query seed only.
-  #   After any RSS state: home ← state.region, activeRegion/status ← RSS (authoritative).
-  active-region:
-    home: r1
-    value: r1
-    status: ACTIVE
-    poll-interval-ms: 5000
-  # Region State Service (master data: activeRegion + status via SSE).
-  # required=true → values from RSS (or yaml starters then RSS); see active-region comments.
-  # required=false → use active-region.home/value/status from this file (defaults above).
-  rss:
-    required: false
-    base-url: ""
-    recovery-group: ""
-    # Query seed for first RSS ?region= when active-region.home is empty (strict RSS mode).
-    # Not used as operational home once state.region arrives.
-    home-region: ""
-    connect-timeout: 30s
   sre:
     stream-listen-token: "sre-stream-dev-token"
   limits:

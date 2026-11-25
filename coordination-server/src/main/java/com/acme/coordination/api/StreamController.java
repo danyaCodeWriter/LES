@@ -1,13 +1,12 @@
 package com.acme.coordination.api;
 
 import com.acme.coordination.etcd.Keyspace;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.region.RegionalScope;
 import com.acme.coordination.service.CoordinatorReadVerificationService;
 import com.acme.coordination.watch.EtcdWatchService;
 import com.acme.coordination.watch.WatchEventDto;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,30 +20,30 @@ public class StreamController {
 
   private final EtcdWatchService watch;
   private final Keyspace keyspace;
-  private final ActiveRegionMonitor activeRegion;
+  private final RegionalScope regionalScope;
   private final CoordinatorReadVerificationService readAuth;
 
   public StreamController(
       EtcdWatchService watch,
       Keyspace keyspace,
-      ActiveRegionMonitor activeRegion,
+      RegionalScope regionalScope,
       CoordinatorReadVerificationService readAuth) {
     this.watch = watch;
     this.keyspace = keyspace;
-    this.activeRegion = activeRegion;
+    this.regionalScope = regionalScope;
     this.readAuth = readAuth;
   }
 
   @GetMapping(value = "/workers", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<WatchEventDto> workers(@PathVariable String tenantId, ServerHttpRequest request) {
     return Mono.fromCompletionStage(readAuth.verifyRegionalStream(request, tenantId))
-        .thenMany(watch.watchPrefix(keyspace.workersPrefix(tenantId, activeRegion.activeRegionId())));
+        .thenMany(watch.watchPrefix(keyspace.workersPrefix(tenantId, regionalScope.regionId())));
   }
 
   @GetMapping(value = "/jobs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<WatchEventDto> jobs(@PathVariable String tenantId, ServerHttpRequest request) {
     return Mono.fromCompletionStage(readAuth.verifyRegionalStream(request, tenantId))
-        .thenMany(watch.watchPrefix(keyspace.jobsPrefix(tenantId, activeRegion.activeRegionId())));
+        .thenMany(watch.watchPrefix(keyspace.jobsPrefix(tenantId, regionalScope.regionId())));
   }
 
   /**
@@ -58,12 +57,5 @@ public class StreamController {
             Flux.merge(
                 watch.watchPrefix(keyspace.regionsPrefix(tenantId)),
                 watch.watchPrefix(keyspace.globalSubtreePrefix(tenantId))));
-  }
-
-  /** When active region changes, clients should re-register coordinator/worker under the new region. */
-  @GetMapping(value = "/active-region", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-  public Flux<ServerSentEvent<String>> activeRegion(@PathVariable String tenantId) {
-    return activeRegion.activeRegionEvents()
-        .map(data -> ServerSentEvent.<String>builder().data(data).build());
   }
 }

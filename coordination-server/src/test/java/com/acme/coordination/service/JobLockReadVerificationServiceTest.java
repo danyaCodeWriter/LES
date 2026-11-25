@@ -2,14 +2,16 @@ package com.acme.coordination.service;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import com.acme.coordination.api.error.ParticipantException;
 import com.acme.coordination.model.CoordinatorRecord;
 import com.acme.coordination.model.JobRecord;
 import com.acme.coordination.model.WorkerRecord;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.config.CoordinationProperties;
+import com.acme.coordination.region.RegionalScope;
+import java.time.Duration;
+import java.util.List;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
@@ -18,7 +20,6 @@ import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpHeaders;
@@ -29,15 +30,21 @@ import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 class JobLockReadVerificationServiceTest {
 
   @Mock private CoordinatorService coordinators;
-  @Mock private ActiveRegionMonitor activeRegion;
   @Mock private JobLockService jobs;
   @Mock private WorkerRegistryService workers;
 
-  @InjectMocks private JobLockReadVerificationService svc;
+  private JobLockReadVerificationService svc;
 
   @BeforeEach
-  void region() {
-    lenient().when(activeRegion.activeRegionId()).thenReturn("r1");
+  void setUp() {
+    var props = new CoordinationProperties(
+        CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord", Duration.ofSeconds(1), Duration.ofSeconds(1)),
+        "",
+        "r1",
+        new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
+        new CoordinationProperties.Sre(""),
+        new CoordinationProperties.Limits(10_000));
+    svc = new JobLockReadVerificationService(coordinators, new RegionalScope(props), jobs, workers);
   }
 
   @Test

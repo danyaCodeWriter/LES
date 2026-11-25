@@ -3,27 +3,18 @@ info:
   title: Coordination service API
   version: "1.0.0"
   description: |
-    REST + SSE поверх etcd. Публичный контракт — **две** семьи: **active-region** (короткие пути без
-    `regionId` в URL) и **global** (`/v1/tenants/{tenant}/global/...`). Текущий logical active region
-    хранится **в etcd per-home**: `/coord/v1/cluster/regions/{home}/activeRegion`
-    (`home` = `coordination.active-region.home`). Pods r1 и r2 в общем etcd не затирают друг другу status.
-    Short-path API подставляют `activeRegion` из ключа своего home.
-    Источник ключа: **RSS** (`coordination.rss.required=true`), иначе bootstrap из
-    `coordination.active-region.*` в yaml, либо runtime **`PUT /v1/active-region`** / gRPC `SetActiveRegion` (SRE)
-    — пишет в ключ **этого** home.
-    Смена ключа → `ActiveRegionMonitor` (etcd watch своего home) → SSE `GET .../stream/active-region`.
+    REST + SSE поверх etcd. Публичный контракт — **две** семьи: **regional** (короткие пути без
+    `regionId` в URL; etcd-сегмент = `coordination.region` / `COORDINATION_REGION` этого LES)
+    и **global** (`/v1/tenants/{tenant}/global/...`). Кто считается «активным» регионом — решение **клиента**;
+    LES только обслуживает lease (coordinator / workers / jobs) и не хранит master-data active region / RSS / status.
 
     Динамическая спецификация: springdoc `/v3/api-docs`, UI `/swagger-ui.html`.
-    gRPC: `proto/coordination/v1/coordination.proto` (`GetActiveRegion` / `SetActiveRegion`; остальные active-region RPC без `region_id`).
+    gRPC: `proto/coordination/v1/coordination.proto` (regional + global lease RPCs; без Get/SetActiveRegion).
 
-    **Роль / статус деплоя:** `ACTIVE` | `STANDBY` | `SWITCH` в etcd (поле `status`; wire: `active`/`stand_in`/`switch`),
-    не через env/file. Bootstrap: RSS или `coordination.active-region.status` (default `ACTIVE`).
-    На STANDBY/SWITCH regional мутации — **403**; global разрешён.
-
-    **Чтение coordinator / workers / jobs** (GET и SSE `stream/workers|jobs|keys`, не `active-region`): нужен тот же секрет,
-    что для renew лидера в этом контуре — `Authorization: Bearer <token>` или `X-Coordinator-Token` (active region
-    vs global соответственно). Дополнительно для SSE `stream/workers|jobs|keys` (regional и global) и для
-    **`PUT /v1/active-region`** / gRPC **`SetActiveRegion`** — статический токен `coordination.sre.stream-listen-token`.
+    **Чтение coordinator / workers / jobs** (GET и SSE `stream/workers|jobs|keys`): нужен тот же секрет,
+    что для renew лидера в этом контуре — `Authorization: Bearer <token>` или `X-Coordinator-Token`
+    (regional vs global соответственно). Дополнительно для SSE `stream/workers|jobs|keys` —
+    статический токен `coordination.sre.stream-listen-token`.
     **`GET .../stream/keys`** — watch по всем coordination-ключам tenant (`regions/` + `global/`, без `idempotency/`);
     авторизация: **global** coordinator read token или тот же SRE stream token (не regional leader).
     В JSON ответах поля renew-token у coordinator/worker/job опущены (null).
@@ -38,16 +29,12 @@ servers:
     description: Локальный сервер
 
 tags:
-  - name: ActiveRegion
-    description: Короткие пути — coordinator, workers, jobs, stream (active region подставляет сервер).
+  - name: Regional
+    description: Короткие пути — coordinator, workers, jobs, stream (сегмент etcd = coordination.region).
   - name: Global
     description: Cross-DC `/global/...` — coordinator, workers, jobs, stream.
   - name: Rings
     description: Consistent hash без etcd.
-  - name: ActiveRegionMeta
-    description: |
-      Cluster-wide logical active region в etcd: `GET`/`PUT /v1/active-region` (PUT — SRE token);
-      `GET /v1/tenants/{tenant}/active-region` — alias.
   - name: KvTickets
     description: |
       Простые ключи в etcd под `.../tenants/{tenant}/global/kv/{keyId}` с опциональным TTL и произвольным JSON-значением;
@@ -56,7 +43,7 @@ tags:
 paths:
   /v1/tenants/{tenantId}/coordinator/acquire:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Захватить coordinator в active region
       operationId: acquireCoordinatorActive
       parameters:
@@ -84,7 +71,7 @@ paths:
 
   /v1/tenants/{tenantId}/coordinator:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Текущий coordinator в active region
       operationId: getCoordinatorActive
       security:
@@ -101,7 +88,7 @@ paths:
 
   /v1/tenants/{tenantId}/coordinator/active:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Алиас get coordinator (active region)
       operationId: getCoordinatorActiveAlias
       security:
@@ -118,7 +105,7 @@ paths:
 
   /v1/tenants/{tenantId}/coordinator/renew:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Продлить lease coordinator (active region), если token совпадает с выданным при acquire
       operationId: renewCoordinatorActive
       parameters:
@@ -549,7 +536,7 @@ paths:
 
   /v1/tenants/{tenantId}/workers/register:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Регистрация worker (active region)
       operationId: registerWorkerActive
       parameters:
@@ -576,7 +563,7 @@ paths:
 
   /v1/tenants/{tenantId}/workers/{workerId}/heartbeat:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Heartbeat worker (active region)
       operationId: workerHeartbeatActive
       parameters:
@@ -600,7 +587,7 @@ paths:
 
   /v1/tenants/{tenantId}/workers/{workerId}/deregister:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Deregister worker (active region)
       operationId: workerDeregisterActive
       parameters:
@@ -624,7 +611,7 @@ paths:
 
   /v1/tenants/{tenantId}/workers/{workerId}/jobs:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Job-lock'и, где holder = этот worker (токен регистрации worker)
       description: |
         Авторизация: `Authorization: Bearer <token из POST .../workers/register>` или заголовок `X-Worker-Token`
@@ -649,9 +636,9 @@ paths:
 
   /v1/tenants/{tenantId}/workers/ids:
     get:
-      tags: [ActiveRegion]
-      summary: Список workerId в active-region пуле (для rings/assign)
-      operationId: listActiveRegionWorkerIds
+      tags: [Regional]
+      summary: Список workerId в regional пуле (для rings/assign)
+      operationId: listRegionalWorkerIds
       security:
         - CoordinatorReadBearer: []
       parameters:
@@ -668,7 +655,7 @@ paths:
 
   /v1/tenants/{tenantId}/workers:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Список workers (active region)
       operationId: listWorkersActive
       security:
@@ -686,7 +673,7 @@ paths:
 
   /v1/tenants/{tenantId}/jobs/{jobId}:acquire:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Захват job-lock (active region)
       operationId: acquireJobActive
       parameters:
@@ -714,7 +701,7 @@ paths:
 
   /v1/tenants/{tenantId}/jobs/{jobId}:release:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       operationId: releaseJobActive
       parameters:
         - $ref: "#/components/parameters/tenantId"
@@ -737,7 +724,7 @@ paths:
 
   /v1/tenants/{tenantId}/jobs/{jobId}:renew:
     post:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: Продлить etcd lease job-lock (тот же token, что при acquire)
       operationId: renewJobActive
       parameters:
@@ -761,7 +748,7 @@ paths:
 
   /v1/tenants/{tenantId}/jobs/{jobId}:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       operationId: getJobActive
       summary: Состояние одного regional job-lock
       description: |
@@ -798,71 +785,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/RingAssignResponse"
 
-  /v1/active-region:
-    get:
-      tags: [ActiveRegionMeta]
-      summary: Cluster-wide logical active region (из etcd)
-      operationId: getClusterActiveRegion
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActiveRegionInfo"
-    put:
-      tags: [ActiveRegionMeta]
-      summary: Задать cluster-wide active region (SRE)
-      operationId: putClusterActiveRegion
-      security:
-        - SreBearer: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                region:
-                  type: string
-                  description: |
-                    Cluster **activeRegion** to set (logical id for short-path etcd). Not the instance home.
-                    Home of this LES is config `coordination.active-region.home` (response field `region`).
-                    Если опущено — предыдущий activeRegion.
-                status:
-                  type: string
-                  enum: [ACTIVE, STANDBY, SWITCH]
-                  description: |
-                    Статус **с точки зрения home** этого LES (`coordination.active-region.home`).
-                    `STANDBY`/`SWITCH` — regional мутации **403**; `ACTIVE` — разрешены.
-                    Синонимы: stand-in, switch-over. Если опущено — предыдущий.
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActiveRegionInfo"
-        "401":
-          description: SRE token отсутствует или не настроен
-        "403":
-          description: SRE token не совпал
 
-  /v1/tenants/{tenantId}/active-region:
-    get:
-      tags: [ActiveRegionMeta]
-      summary: Alias — тот же cluster active region (tenantId только в JSON)
-      operationId: getActiveRegion
-      parameters:
-        - $ref: "#/components/parameters/tenantId"
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActiveRegionInfo"
 
   /v1/tenants/{tenantId}/stream/workers:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: SSE — изменения workers (active region)
       operationId: streamWorkersActive
       security:
@@ -881,7 +808,7 @@ paths:
 
   /v1/tenants/{tenantId}/stream/jobs:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: SSE — изменения jobs (active region)
       operationId: streamJobsActive
       security:
@@ -897,7 +824,7 @@ paths:
 
   /v1/tenants/{tenantId}/stream/keys:
     get:
-      tags: [ActiveRegion]
+      tags: [Regional]
       summary: SSE — все coordination-ключи tenant (regions + global)
       operationId: streamTenantKeysActive
       security:
@@ -914,462 +841,3 @@ paths:
               schema:
                 type: string
 
-  /v1/tenants/{tenantId}/stream/active-region:
-    get:
-      tags: [ActiveRegion]
-      summary: SSE — смена active region
-      operationId: streamActiveRegion
-      parameters:
-        - $ref: "#/components/parameters/tenantId"
-      responses:
-        "200":
-          description: |
-            `text/event-stream`. Снапшот при подключении, затем событие на каждую смену
-            region/status в etcd (в т.ч. когда RSS записал новый state, или после `PUT /v1/active-region`).
-            Поле `data` — JSON как у `GET .../active-region` (без `tenantId`): `region` (home этого LES),
-            `activeRegion` (кто serves), `status`, `source`, drain-поля.
-          content:
-            text/event-stream:
-              schema:
-                type: string
-
-components:
-  securitySchemes:
-    CoordinatorReadBearer:
-      type: http
-      scheme: bearer
-      description: |
-        Token из `POST .../coordinator/acquire` (active region) или `POST .../global/coordinator/acquire`.
-        Тот же секрет, что для соответствующего `.../renew`. Альтернатива без Bearer — заголовок `X-Coordinator-Token`.
-        Для **SSE** путей `.../stream/workers`, `.../stream/jobs`, `.../stream/keys`, `.../global/stream/workers`, `.../global/stream/jobs`
-        допускается вместо токена лидера статический `coordination.sre.stream-listen-token` (тот же Bearer или
-        `X-Coordinator-Token`) — только эти пять операций; для **`.../stream/keys`** дополнительно допустим **только**
-        global coordinator read token или SRE-токен (не regional leader). Остальные GET по-прежнему только с токеном лидера.
-    SreBearer:
-      type: http
-      scheme: bearer
-      description: |
-        Статический `coordination.sre.stream-listen-token` (env `COORDINATION_SRE_STREAM_LISTEN_TOKEN`).
-        Нужен для `PUT /v1/active-region` / gRPC `SetActiveRegion`. Альтернатива: `X-Coordinator-Token` с тем же значением.
-    JobHolderWorkerRead:
-      type: http
-      scheme: bearer
-      description: |
-        Только для **GET одного job** (`.../jobs/{jobId}` или `.../global/jobs/{jobId}`): токен из
-        `POST .../workers/register` (тот же контур), если этот worker — **holder** lock'а. То же значение можно
-        передать в `X-Worker-Token` (как для GET `.../workers/{workerId}/jobs`).
-
-  parameters:
-    tenantId:
-      name: tenantId
-      in: path
-      required: true
-      schema:
-        type: string
-    workerId:
-      name: workerId
-      in: path
-      required: true
-      schema:
-        type: string
-    jobId:
-      name: jobId
-      in: path
-      required: true
-      schema:
-        type: string
-    idempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: false
-      schema:
-        type: string
-        maxLength: 128
-      description: |
-        Опциональный ключ идемпотентности (алиас `X-Idempotency-Key`). Учитывается только если на сервере включено
-        `coordination.idempotency.enabled` и путь в allowlist. Ответ **200** / **201** / **409** кешируется до TTL.
-
-  schemas:
-    StringMap:
-      type: object
-      additionalProperties:
-        type: string
-
-    CoordinatorAcquireRequest:
-      type: object
-      required: [coordinatorId, instanceId, ttlSeconds]
-      properties:
-        coordinatorId:
-          type: string
-          description: Стабильный логический id роли координатора (аналог workerId)
-        instanceId:
-          type: string
-          description: Id процесса-владельца lease; должен совпадать с renew
-        ttlSeconds:
-          type: integer
-          minimum: 10
-          maximum: 300
-          description: Lease TTL для etcd (секунды); 10–300 включительно
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-
-    ResourceConflict:
-      type: object
-      description: Конфликт при создании ресурса (лидер / job / worker уже есть)
-      properties:
-        error:
-          type: string
-          description: COORDINATOR_EXISTS | JOB_EXISTS | WORKER_EXISTS
-        message:
-          type: string
-        currentHolder:
-          description: Для COORDINATOR_EXISTS / JOB_EXISTS — текущий владелец
-          oneOf:
-            - $ref: "#/components/schemas/CoordinatorRecord"
-            - $ref: "#/components/schemas/JobRecord"
-        alreadyRegistered:
-          description: Для WORKER_EXISTS — текущая регистрация
-          $ref: "#/components/schemas/WorkerRecord"
-
-    CoordinatorRenewRequest:
-      type: object
-      required: [token]
-      properties:
-        token:
-          type: string
-          description: Секрет, возвращённый в ответе acquire (как token у воркера)
-
-    CoordinatorRecord:
-      type: object
-      required: [coordinatorId, instanceId, issuedAt, fenceEpoch]
-      properties:
-        coordinatorId:
-          type: string
-        instanceId:
-          type: string
-        token:
-          type: string
-          description: Выдаётся при успешном acquire; нужен для renew
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-        issuedAt:
-          type: string
-          format: date-time
-        fenceEpoch:
-          type: integer
-          format: int64
-          description: Монотонный fencing token для записи в хранилища
-
-    CoordinatorState:
-      type: object
-      description: CoordinatorRecord + lease/modRevision из etcd
-      properties:
-        record:
-          $ref: "#/components/schemas/CoordinatorRecord"
-        leaseId:
-          type: integer
-          format: int64
-        modRevision:
-          type: integer
-          format: int64
-
-    AcquireCoordinatorResult:
-      type: object
-      properties:
-        acquired:
-          type: boolean
-        leaseId:
-          type: integer
-          format: int64
-        revision:
-          type: integer
-          format: int64
-        fenceEpoch:
-          type: integer
-          format: int64
-          description: При acquired=true — новый epoch; при false может отражать текущего лидера
-        token:
-          type: string
-          description: При acquired=true — секрет для renew (дублирует record.token после GET)
-        currentHolder:
-          $ref: "#/components/schemas/CoordinatorRecord"
-
-    WorkerRegisterRequest:
-      type: object
-      required: [workerId, instanceId, ttlSeconds]
-      properties:
-        workerId:
-          type: string
-        instanceId:
-          type: string
-        ttlSeconds:
-          type: integer
-          minimum: 10
-          maximum: 300
-          description: Lease TTL для etcd (секунды); 10–300 включительно
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-
-    WorkerHeartbeatRequest:
-      type: object
-      required: [token]
-      properties:
-        token:
-          type: string
-
-    WorkerRecord:
-      type: object
-      properties:
-        workerId:
-          type: string
-        instanceId:
-          type: string
-        token:
-          type: string
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-        issuedAt:
-          type: string
-          format: date-time
-
-    WorkerState:
-      type: object
-      properties:
-        record:
-          $ref: "#/components/schemas/WorkerRecord"
-        leaseId:
-          type: integer
-          format: int64
-        modRevision:
-          type: integer
-          format: int64
-
-    WorkerRegisterResult:
-      type: object
-      properties:
-        created:
-          type: boolean
-        token:
-          type: string
-        leaseId:
-          type: integer
-          format: int64
-        alreadyRegistered:
-          $ref: "#/components/schemas/WorkerRecord"
-
-    JobAcquireRequest:
-      type: object
-      required: [holder, ttlSeconds, participantToken]
-      properties:
-        holder:
-          type: string
-          description: |
-            Идентификатор участника, который берёт лок: **coordinatorId** активного регионального (или глобального)
-            лидера, либо **workerId**, зарегистрированного в том же контуре (active region для regional jobs;
-            глобальный пул для `.../global/jobs/...`). Должен совпадать с `participantToken` (токен acquire лидера
-            или токен register воркера).
-        ttlSeconds:
-          type: integer
-          minimum: 10
-          maximum: 300
-          description: Lease TTL для etcd (секунды); 10–300 включительно
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-        participantToken:
-          type: string
-          description: |
-            Доказательство участника: `token` из `coordinator/acquire` (если `holder` = coordinatorId) или из
-            `workers/register` / `global/workers/register` (если `holder` = workerId). Без него знание только id
-            недостаточно для захвата лока.
-
-    JobTokenRequest:
-      type: object
-      required: [token]
-      properties:
-        token:
-          type: string
-          description: Секрет из ответа `...:acquire` при acquired=true (как у coordinator/worker).
-
-    JobRecord:
-      type: object
-      properties:
-        jobId:
-          type: string
-        holder:
-          type: string
-        token:
-          type: string
-          description: Секрет владения; в старых ключах может отсутствовать (только holder).
-        metadata:
-          $ref: "#/components/schemas/StringMap"
-        issuedAt:
-          type: string
-          format: date-time
-
-    JobState:
-      type: object
-      properties:
-        record:
-          $ref: "#/components/schemas/JobRecord"
-        leaseId:
-          type: integer
-          format: int64
-        modRevision:
-          type: integer
-          format: int64
-
-    KvPutRequest:
-      type: object
-      required: [value]
-      properties:
-        value:
-          description: Произвольный JSON (объект, массив, примитив)
-        ttlSeconds:
-          type: integer
-          nullable: true
-          minimum: 10
-          maximum: 300
-          description: Если задано — etcd lease; иначе ключ без TTL (пока не удалён)
-
-    KvPutResponse:
-      type: object
-      properties:
-        created:
-          type: boolean
-        keyId:
-          type: string
-        accessToken:
-          type: string
-          nullable: true
-          description: Только при created=true; для GET/DELETE
-        leaseId:
-          type: integer
-          format: int64
-        modRevision:
-          type: integer
-          format: int64
-
-    KvGetResponse:
-      type: object
-      properties:
-        value:
-          description: Пользовательское значение
-        leaseId:
-          type: integer
-          format: int64
-        modRevision:
-          type: integer
-          format: int64
-
-    AcquireJobResult:
-      type: object
-      properties:
-        acquired:
-          type: boolean
-        leaseId:
-          type: integer
-          format: int64
-        revision:
-          type: integer
-          format: int64
-        token:
-          type: string
-          description: При acquired=true — сохраните для renew/release (как coordinator token).
-        currentHolder:
-          $ref: "#/components/schemas/JobRecord"
-
-    ComputeRangesRequest:
-      type: object
-      required: [workerIds]
-      properties:
-        workerIds:
-          type: array
-          items:
-            type: string
-          description: Список workerId (длина списка — число участников кольца); порядок влияет только на tie-break при коллизии позиций.
-        virtualNodes:
-          type: integer
-          minimum: 1
-          description: Число виртуальных узлов на worker (Ketama); если не передано или ≤0 — на сервере 128.
-        withPos:
-          type: boolean
-          default: false
-          description: |
-            Если true — в ответе будет массив `points` (все vnode с полем `pos` на кольце). По умолчанию только `ranges`
-            (меньше трафика). В JSON также принимается алиас `withpos`.
-
-    RingAssignResponse:
-      type: object
-      required: [ranges]
-      properties:
-        ranges:
-          type: object
-          additionalProperties:
-            type: array
-            items:
-              $ref: "#/components/schemas/RingRangeHalfOpen"
-          description: workerId → список полуинтервалов [start,end) на uint32-кольце (в JSON как числа).
-        points:
-          type: array
-          description: Присутствует только при withPos=true в запросе
-          items:
-            type: object
-            required: [pos, workerId]
-            properties:
-              pos:
-                type: integer
-                format: int64
-                description: Позиция vnode на кольце (0..2^32-1)
-              workerId:
-                type: string
-
-    RingRangeHalfOpen:
-      type: object
-      required: [start, end]
-      properties:
-        start:
-          type: integer
-          format: int64
-        end:
-          type: integer
-          format: int64
-
-    ActiveRegionInfo:
-      type: object
-      properties:
-        tenantId:
-          type: string
-        region:
-          type: string
-          description: |
-            Home-регион **этого** инстанса LES.
-            Источник: RSS `state.region` (если `rss.required=true`) либо seed
-            `coordination.active-region.home` / `coordination.rss.home-region`.
-            Не обязан совпадать с `activeRegion`.
-        status:
-          type: string
-          enum: [active, stand_in, switch]
-          description: |
-            Статус **этого** LES (POV home): `active` только если `region`(home) == `activeRegion`.
-            Иначе `stand_in`. `switch` — маркер переключения из etcd/RSS.
-            Только на `active` разрешены regional jobs/coordinator/workers; на stand_in/switch — **403**.
-            Global API разрешён в обоих ЦОД.
-        activeRegion:
-          type: string
-          description: |
-            Кто сейчас serves кластер (ключ etcd; подставляется в short-path `.../regions/{activeRegion}/...`).
-            Может отличаться от `region` (home этого LES).
-        source:
-          type: string
-          description: Источник снимка — `etcd`, `etcd-missing`, `initial` (bootstrap yaml → etcd на старте)
-        regionalWritesBlocked:
-          type: boolean
-          description: |
-            true пока после смены active region не освободился сегмент предыдущего региона: по умолчанию ждём TTL
-            lease-ключей coordinator/workers/jobs (кроме coordinationEpoch). При роли деплоя `SWITCH` те же ключи
-            удаляются из etcd принудительно на каждом poll drain (ускорение; безопасно только если владельцы остановлены).
-            Пока true — acquire/register/job в active-region отклоняются (409).
-        drainingPreviousRegion:
-          type: string
-          nullable: true
-          description: Id предыдущего активного региона, ключи которого ждём до TTL; null если drain не активен

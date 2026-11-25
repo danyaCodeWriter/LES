@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Пошаговый happy path по REST ACTIVE (пауза DEMO_STEP_PAUSE_SEC между шагами, по умолчанию 20).
-# Предусловия: etcd, init-file, run-active (см. scripts/demo-two-dc.sh).
+# Предусловия: etcd, run-active (см. scripts/demo-two-dc.sh).
 #
 #   export DEMO_STEP_PAUSE_SEC=15   # опционально
 #   ./scripts/demo-step-happy-path.sh
@@ -16,7 +16,7 @@ main() {
   demo_need_tools
   demo_print_usage_pause
   echo ""
-  echo "Сценарий: happy path (ACTIVE, active-region API). Рекомендуется чистый etcd для tenant"
+  echo "Сценарий: happy path (regional + global leases). Рекомендуется чистый etcd для tenant"
   echo "или отдельный TENANT=..., иначе шаги acquire/register могут вернуть HTTP 409, если lease ещё жив."
   echo ""
   demo_require_active_healthy
@@ -29,12 +29,12 @@ main() {
   local gcoord="step-happy-global"
   local ginst="step-happy-global-pod"
 
-  demo_step_http "1" "Проверка текущего active region" "GET" \
-    "${BASE_ACTIVE}/v1/tenants/${TENANT}/active-region" "" \
-    "Только чтение конфигурации (файл/env); etcd под префиксом tenant для этого запроса не обязателен."
+  demo_step_http "1" "Health LES" "GET" \
+    "${BASE_ACTIVE}/actuator/health" "" \
+    "LES готов принимать regional/global lease API (сегмент etcd = coordination.region)."
 
   echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-  echo "║ Шаг 2 — Coordinator acquire (лидер в текущем logical region)"
+  echo "║ Шаг 2 — Coordinator acquire (regional short-path / coordination.region)"
   echo "╚══════════════════════════════════════════════════════════════════════════════╝"
   local coord_json coord_tok
   coord_json="{\"coordinatorId\":\"${cid}\",\"instanceId\":\"${iid}\",\"ttlSeconds\":300,\"metadata\":{\"logicalRegion\":\"${COORD_DEMO_REGION_INITIAL}\"}}"

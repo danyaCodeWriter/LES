@@ -2,7 +2,7 @@ package com.acme.coordination.api;
 
 import com.acme.coordination.api.dto.JobAcquireRequest;
 import com.acme.coordination.api.dto.JobTokenRequest;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.region.RegionalScope;
 import com.acme.coordination.service.JobLockReadVerificationService;
 import com.acme.coordination.service.JobLockService;
 import com.acme.coordination.service.JobParticipantVerificationService;
@@ -24,17 +24,17 @@ public class JobsController {
   private final JobLockService jobs;
   private final JobParticipantVerificationService jobParticipants;
   private final JobLockReadVerificationService jobReadAuth;
-  private final ActiveRegionMonitor activeRegion;
+  private final RegionalScope regionalScope;
 
   public JobsController(
       JobLockService jobs,
       JobParticipantVerificationService jobParticipants,
       JobLockReadVerificationService jobReadAuth,
-      ActiveRegionMonitor activeRegion) {
+      RegionalScope regionalScope) {
     this.jobs = jobs;
     this.jobParticipants = jobParticipants;
     this.jobReadAuth = jobReadAuth;
-    this.activeRegion = activeRegion;
+    this.regionalScope = regionalScope;
   }
 
   @PostMapping("/{jobId}:acquire")
@@ -45,10 +45,10 @@ public class JobsController {
   ) {
     Map<String, String> md = req.metadata() != null ? req.metadata() : Map.of();
     return jobParticipants
-        .verifyRegional(tenantId, activeRegion.activeRegionId(), req.holder(), req.participantToken())
+        .verifyRegional(tenantId, regionalScope.regionId(), req.holder(), req.participantToken())
         .thenCompose(
             v ->
-                jobs.acquire(tenantId, activeRegion.activeRegionId(), jobId, req.holder(), req.ttlSeconds(), md))
+                jobs.acquire(tenantId, regionalScope.regionId(), jobId, req.holder(), req.ttlSeconds(), md))
         .thenApply(ApiConflicts::requireNewJobLock);
   }
 
@@ -59,7 +59,7 @@ public class JobsController {
       @Valid @RequestBody JobTokenRequest req
   ) {
     return jobs
-        .releaseIfCredential(tenantId, activeRegion.activeRegionId(), jobId, req.token(), null)
+        .releaseIfCredential(tenantId, regionalScope.regionId(), jobId, req.token(), null)
         .thenApply(ok -> Map.of("released", ok));
   }
 
@@ -70,7 +70,7 @@ public class JobsController {
       @Valid @RequestBody JobTokenRequest req
   ) {
     return jobs
-        .renewIfCredential(tenantId, activeRegion.activeRegionId(), jobId, req.token(), null)
+        .renewIfCredential(tenantId, regionalScope.regionId(), jobId, req.token(), null)
         .thenApply(ok -> Map.of("renewed", ok));
   }
 

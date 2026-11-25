@@ -158,11 +158,6 @@ demo_log_get_coordinator_auth() {
     fi
     return 0
   fi
-  # Публичный snapshot без tenant pool: только GET …/v1/tenants/{id}/active-region (не stream, не coordinator/workers/jobs).
-  if [[ "$path" =~ /v1/tenants/[^/]+/active-region$ ]]; then
-    echo "Заголовки: (Authorization не нужен — конфиг active region; не путать с GET coordinator/workers/jobs)."
-    return 0
-  fi
   if [[ "$path" =~ /v1/tenants/[^/]+/global/jobs/[^/]+$ ]]; then
     echo "Правило: GET …/global/jobs/{jobId} — токен **лидера global coordinator** (\`Authorization: Bearer\` / \`X-Coordinator-Token\`) **или** токен **регистрации воркера-holder** этого job (тот же Bearer или \`X-Worker-Token\`)."
     if [[ -n "${bearer}" ]]; then

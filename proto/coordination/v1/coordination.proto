@@ -25,7 +25,7 @@ message CoordinatorPayload {
 
 message Empty {}
 
-// --- Active region (сервер подставляет текущий active region; region_id в запросе не передаётся) ---
+// --- Regional leases (region segment is coordination.region on this LES; region_id is not in the request) ---
 
 message AcquireCoordinatorRequest {
   string tenant_id = 1;
@@ -90,7 +90,7 @@ message RenewGlobalCoordinatorRequest {
   string token = 3;
 }
 
-// --- Active region workers ---
+// --- Regional workers ---
 
 message RegisterWorkerRequest {
   string tenant_id = 1;
@@ -161,13 +161,13 @@ message ListGlobalWorkersRequest {
   string coordinator_read_token = 2;
 }
 
-// --- Active region jobs ---
+// --- Regional jobs ---
 
 message AcquireJobRequest {
   string tenant_id = 1;
   reserved 2;
   string job_id = 3;
-  // Regional coordinatorId (current leader) or registered workerId in this active region.
+  // Regional coordinatorId (current leader) or registered workerId in this configured region.
   string holder = 4;
   // etcd lease TTL seconds; must be 10..300 inclusive.
   int32 ttl_seconds = 5;
@@ -298,30 +298,6 @@ message Ranges {
   repeated Range ranges = 1;
 }
 
-// --- Cluster-wide active region (etcd /coord/v1/cluster/activeRegion) ---
-
-message GetActiveRegionRequest {}
-
-message ActiveRegionInfo {
-  // Home region of this LES instance (config coordination.active-region.home).
-  string region_id = 1;
-  string source = 2;
-  string status = 3;
-  bool regional_writes_blocked = 4;
-  string draining_previous_region = 5;
-  // Cluster active region (may differ from region_id when this instance is stand_in).
-  string active_region = 6;
-}
-
-message SetActiveRegionRequest {
-  // Cluster active region to set (not the instance home).
-  string region_id = 1;
-  // coordination.sre.stream-listen-token (same as HTTP PUT /v1/active-region).
-  string access_credential = 2;
-  // ACTIVE | STANDBY | SWITCH (empty = keep previous / default ACTIVE).
-  string status = 3;
-}
-
 // --- Tenant-wide coordination key watch (regional + global prefixes; idempotency keys excluded from stream scope) ---
 
 message TenantKeyWatchEvent {
@@ -368,9 +344,6 @@ service Coordination {
   rpc GetGlobalJob(GetGlobalJobRequest) returns (GetJobResponse);
 
   rpc ComputeRanges(ComputeRangesRequest) returns (ComputeRangesResponse);
-
-  rpc GetActiveRegion(GetActiveRegionRequest) returns (ActiveRegionInfo);
-  rpc SetActiveRegion(SetActiveRegionRequest) returns (ActiveRegionInfo);
 
   /** Server-streaming watch: all coordination keys under tenant {@code regions/} + {@code global/}. */
   rpc WatchTenantKeys(WatchTenantKeysRequest) returns (stream TenantKeyWatchEvent);

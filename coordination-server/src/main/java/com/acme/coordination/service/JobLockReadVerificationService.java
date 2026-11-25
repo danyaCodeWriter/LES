@@ -2,7 +2,7 @@ package com.acme.coordination.service;
 
 import com.acme.coordination.api.error.ParticipantException;
 import com.acme.coordination.model.WorkerRecord;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.region.RegionalScope;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -22,17 +22,17 @@ import org.springframework.stereotype.Service;
 public class JobLockReadVerificationService {
 
   private final CoordinatorService coordinators;
-  private final ActiveRegionMonitor activeRegion;
+  private final RegionalScope regionalScope;
   private final JobLockService jobs;
   private final WorkerRegistryService workers;
 
   public JobLockReadVerificationService(
       CoordinatorService coordinators,
-      ActiveRegionMonitor activeRegion,
+      RegionalScope regionalScope,
       JobLockService jobs,
       WorkerRegistryService workers) {
     this.coordinators = coordinators;
-    this.activeRegion = activeRegion;
+    this.regionalScope = regionalScope;
     this.jobs = jobs;
     this.workers = workers;
   }
@@ -43,10 +43,10 @@ public class JobLockReadVerificationService {
     List<String> coord = dedupeNonBlank(List.of(header(request, "X-Coordinator-Token"), bearer(request)));
     List<String> workerTok = dedupeNonBlank(List.of(header(request, "X-Worker-Token"), bearer(request)));
     return loadAndAuthorize(
-        coordinators.get(tenantId, activeRegion.activeRegionId()),
-        jobs.get(tenantId, activeRegion.activeRegionId(), jobId),
+        coordinators.get(tenantId, regionalScope.regionId()),
+        jobs.get(tenantId, regionalScope.regionId(), jobId),
         tenantId,
-        activeRegion.activeRegionId(),
+        regionalScope.regionId(),
         false,
         coord,
         workerTok);
@@ -71,10 +71,10 @@ public class JobLockReadVerificationService {
     List<String> coord = dedupeNonBlank(List.of(trimToEmpty(coordinatorReadToken)));
     List<String> workerTok = dedupeNonBlank(List.of(trimToEmpty(workerRegisterToken)));
     return loadAndAuthorize(
-        coordinators.get(tenantId, activeRegion.activeRegionId()),
-        jobs.get(tenantId, activeRegion.activeRegionId(), jobId),
+        coordinators.get(tenantId, regionalScope.regionId()),
+        jobs.get(tenantId, regionalScope.regionId(), jobId),
         tenantId,
-        activeRegion.activeRegionId(),
+        regionalScope.regionId(),
         false,
         coord,
         workerTok);

@@ -15,7 +15,7 @@ public class OpenApiConfig {
             .title("Coordination service API")
             .version("v1")
             .description(
-                "REST + SSE over etcd: active-region short paths (no region in URL), cross-DC /global/... . "
+                "REST + SSE over etcd: regional short paths (region from coordination.region), cross-DC /global/... . "
                     + "See static openapi/openapi.yaml."));
   }
 }

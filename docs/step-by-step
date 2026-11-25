@@ -5,4 +5,3 @@ export COORD_SSE_BEARER='<token regional coordinator acquire>'
 ./scripts/demo-step-bench-rest.sh
 ./scripts/demo-step-bench-grpc.sh
 ./scripts/demo-step-job-lock-contention.sh
-./scripts/demo-step-standby-regional-denied.sh

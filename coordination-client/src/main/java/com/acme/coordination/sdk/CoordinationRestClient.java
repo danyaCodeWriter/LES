@@ -3,8 +3,6 @@ package com.acme.coordination.sdk;
 import com.acme.coordination.ring.RingAssignment;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -16,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Consumer;
 
 /**
  * Thin REST client for coordination-server (Jackson JSON).
@@ -298,32 +295,6 @@ public final class CoordinationRestClient implements AutoCloseable {
         workerRegisterToken);
   }
 
-  public JsonNode getActiveRegion(String tenantId) throws Exception {
-    return getJson("/v1/tenants/" + tenantId + "/active-region", null);
-  }
-
-  /** Cluster-wide {@code GET /v1/active-region}. */
-  public JsonNode getClusterActiveRegion() throws Exception {
-    return getJson("/v1/active-region", null);
-  }
-
-  /** Cluster-wide {@code PUT /v1/active-region} (SRE token). */
-  public JsonNode putClusterActiveRegion(String region, String status, String sreToken) throws Exception {
-    Map<String, Object> body = new LinkedHashMap<>();
-    if (region != null) {
-      body.put("region", region);
-    }
-    if (status != null) {
-      body.put("status", status);
-    }
-    return putJson("/v1/active-region", body, sreToken);
-  }
-
-  /** {@link #putClusterActiveRegion(String, String, String)} with status omitted (keep previous). */
-  public JsonNode putClusterActiveRegion(String region, String sreToken) throws Exception {
-    return putClusterActiveRegion(region, null, sreToken);
-  }
-
   /**
    * POST /v1/rings/assign (no tenant) and build a {@link RingAssignment} from {@code ranges} only (no {@code withPos}).
    */
@@ -335,32 +306,6 @@ public final class CoordinationRestClient implements AutoCloseable {
     }
     JsonNode root = postJson("/v1/rings/assign", body, null);
     return RingAssignments.fromAssignResponse(root);
-  }
-
-  /**
-   * Long-poll style consumer: reads SSE lines and invokes consumer for each {@code data:} JSON payload.
-   * Caller should run in a dedicated thread; this method blocks.
-   */
-  public void streamActiveRegion(String tenantId, Consumer<String> onJsonLine) throws Exception {
-    URI uri = URI.create(baseUrl + "/v1/tenants/" + tenantId + "/stream/active-region");
-    HttpRequest req = HttpRequest.newBuilder(uri)
-        .timeout(Duration.ZERO)
-        .header("Accept", "text/event-stream")
-        .GET()
-        .build();
-
-    HttpResponse<java.io.InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
-    if (resp.statusCode() / 100 != 2) {
-      throw new IllegalStateException("SSE failed: HTTP " + resp.statusCode());
-    }
-    try (BufferedReader br = new BufferedReader(new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
-      String line;
-      while ((line = br.readLine()) != null) {
-        if (line.startsWith("data:")) {
-          onJsonLine.accept(line.substring("data:".length()).trim());
-        }
-      }
-    }
   }
 
   private JsonNode getJsonJobRead(String path, String coordinatorReadToken, String workerRegisterToken)
@@ -429,23 +374,6 @@ public final class CoordinationRestClient implements AutoCloseable {
     HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     if (resp.statusCode() / 100 != 2) {
       throw new IllegalStateException("POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
-    }
-    return json.readTree(resp.body());
-  }
-
-  private JsonNode putJson(String path, Object body, String bearerToken) throws Exception {
-    String payload = json.writeValueAsString(body);
-    HttpRequest.Builder rb =
-        HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(30))
-            .header("Content-Type", "application/json")
-            .PUT(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
-    if (bearerToken != null && !bearerToken.isBlank()) {
-      rb.header("Authorization", "Bearer " + bearerToken.trim());
-    }
-    HttpResponse<String> resp = http.send(rb.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-    if (resp.statusCode() / 100 != 2) {
-      throw new IllegalStateException("PUT " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
     }
     return json.readTree(resp.body());
   }

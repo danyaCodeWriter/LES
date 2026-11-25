@@ -1,6 +1,5 @@
 package com.acme.coordination.config;
 
-import com.acme.coordination.deployment.DeploymentRole;
 import java.time.Duration;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -9,47 +8,23 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record CoordinationProperties(
     Etcd etcd,
     String apiKey,
-    ActiveRegion activeRegion,
+    /** Etcd region segment for short-path regional APIs. Env: {@code COORDINATION_REGION}. */
+    String region,
     Idempotency idempotency,
     Sre sre,
-    Limits limits,
-    Rss rss
+    Limits limits
 ) {
   public CoordinationProperties {
-    activeRegion = activeRegion == null ? new ActiveRegion("", "r1", "ACTIVE", 5000L) : activeRegion;
+    if (region == null || region.isBlank()) {
+      region = "r1";
+    } else {
+      region = region.trim();
+    }
     idempotency = idempotency == null
         ? new Idempotency(false, 86400, 128, 262_144)
         : idempotency;
     sre = sre == null ? new Sre("") : sre;
     limits = limits == null ? new Limits(10_000) : limits;
-    rss = rss == null ? new Rss(false, "", "", "", Duration.ofSeconds(30)) : rss;
-  }
-
-  /**
-   * Config-only home seed (yaml). Prefer {@link com.acme.coordination.region.InstanceHomeRegion}
-   * at runtime (may be filled from RSS).
-   */
-  public String instanceHomeRegion() {
-    String home = activeRegion.homeRegion();
-    if (home != null && !home.isBlank()) {
-      return home;
-    }
-    String rssHome = rss.homeRegion();
-    if (rssHome != null && !rssHome.isBlank()) {
-      return rssHome;
-    }
-    // yaml mode (rss.required=false): blank → r1; RSS mode leaves blank until InstanceHomeRegion/RSS
-    return rss.required() ? "" : "r1";
-  }
-
-  /**
-   * Explicit yaml starters for home/activeRegion/status ({@code active-region.home} set).
-   * When {@code rss.required=true} and this is true — LES may start on yaml and wait for RSS.
-   * When false — first values must come from RSS or the process must not become operational.
-   */
-  public boolean hasYamlActiveRegionStarters() {
-    String home = activeRegion.home();
-    return home != null && !home.isBlank();
   }
 
   public record Etcd(
@@ -128,55 +103,6 @@ public record CoordinationProperties(
     }
   }
 
-  /**
-   * Yaml bootstrap for active-region.
-   *
-   * <ul>
-   *   <li>{@code rss.required=false}: always used (blank fields → home via {@code InstanceHomeRegion}
-   *       default {@code r1}, value {@code r1}, status {@code ACTIVE}).
-   *   <li>{@code rss.required=true}: used only when {@link CoordinationProperties#hasYamlActiveRegionStarters()}
-   *       — temporary starters while waiting for RSS; otherwise first values must come from RSS.
-   * </ul>
-   *
-   * @param home this LES home; blank → {@code r1} if RSS off, else seed/{@code state.region}
-   * @param value bootstrap {@code activeRegion}; blank → {@code r1}
-   * @param status bootstrap POV status; blank → {@code ACTIVE}
-   */
-  public record ActiveRegion(String home, String value, String status, Long pollIntervalMs) {
-    public ActiveRegion {
-      if (value == null || value.isBlank()) {
-        value = "r1";
-      } else {
-        value = value.trim();
-      }
-      if (home == null) {
-        home = "";
-      } else {
-        home = home.trim();
-      }
-      if (status == null || status.isBlank()) {
-        status = "ACTIVE";
-      } else {
-        status = DeploymentRole.parse(status).name();
-      }
-      if (pollIntervalMs == null || pollIntervalMs <= 0) {
-        pollIntervalMs = 5000L;
-      }
-    }
-
-    public String homeRegion() {
-      return home;
-    }
-
-    public String bootstrapRegionId() {
-      return value;
-    }
-
-    public DeploymentRole bootstrapStatus() {
-      return DeploymentRole.parse(status);
-    }
-  }
-
   public record Idempotency(
       boolean enabled,
       int ttlSeconds,
@@ -194,40 +120,4 @@ public record CoordinationProperties(
     }
   }
 
-  /**
-   * Region State Service (RSS) — master data for logical active region + status.
-   * SSE: {@code GET {baseUrl}/v1/recovery-groups/{recoveryGroup}/active-region?region={homeRegion}}.
-   */
-  public record Rss(
-      boolean required,
-      String baseUrl,
-      String recoveryGroup,
-      String homeRegion,
-      Duration connectTimeout
-  ) {
-    public Rss {
-      if (baseUrl == null) {
-        baseUrl = "";
-      } else {
-        baseUrl = baseUrl.trim().replaceAll("/+$", "");
-      }
-      if (recoveryGroup == null) {
-        recoveryGroup = "";
-      } else {
-        recoveryGroup = recoveryGroup.trim();
-      }
-      if (homeRegion == null) {
-        homeRegion = "";
-      } else {
-        homeRegion = homeRegion.trim();
-      }
-      if (connectTimeout == null || connectTimeout.isNegative() || connectTimeout.isZero()) {
-        connectTimeout = Duration.ofSeconds(30);
-      }
-    }
-
-    public boolean isConfigured() {
-      return baseUrl != null && !baseUrl.isBlank() && recoveryGroup != null && !recoveryGroup.isBlank();
-    }
-  }
 }

@@ -2,7 +2,7 @@ package com.acme.coordination.api;
 
 import com.acme.coordination.api.dto.CoordinatorAcquireRequest;
 import com.acme.coordination.api.dto.CoordinatorRenewRequest;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.region.RegionalScope;
 import com.acme.coordination.service.CoordinatorReadVerificationService;
 import com.acme.coordination.service.CoordinatorService;
 import jakarta.validation.Valid;
@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Coordinator for the <strong>active region</strong> (resolved server-side via {@code ActiveRegionMonitor}).
+ * Regional coordinator for this LES ({@code coordination.region} via {@link RegionalScope}).
  * Cross-DC singleton: {@code /v1/tenants/{tenant}/global/coordinator}.
  */
 @RestController
@@ -26,13 +26,13 @@ public class CoordinatorController {
 
   private final CoordinatorService coordinator;
   private final CoordinatorReadVerificationService readAuth;
-  private final ActiveRegionMonitor activeRegion;
+  private final RegionalScope regionalScope;
 
   public CoordinatorController(
-      CoordinatorService coordinator, CoordinatorReadVerificationService readAuth, ActiveRegionMonitor activeRegion) {
+      CoordinatorService coordinator, CoordinatorReadVerificationService readAuth, RegionalScope regionalScope) {
     this.coordinator = coordinator;
     this.readAuth = readAuth;
-    this.activeRegion = activeRegion;
+    this.regionalScope = regionalScope;
   }
 
   @PostMapping("/acquire")
@@ -42,11 +42,11 @@ public class CoordinatorController {
   ) {
     Map<String, String> md = req.metadata() != null ? req.metadata() : Map.of();
     return coordinator
-        .acquire(tenantId, activeRegion.activeRegionId(), req.coordinatorId(), req.instanceId(), req.ttlSeconds(), md)
+        .acquire(tenantId, regionalScope.regionId(), req.coordinatorId(), req.instanceId(), req.ttlSeconds(), md)
         .thenApply(ApiConflicts::requireNewCoordinator);
   }
 
-  /** Current coordinator in the <strong>active</strong> region only. */
+  /** Current coordinator in this instance's configured region. */
   @GetMapping
   public CompletableFuture<Object> get(@PathVariable String tenantId, ServerHttpRequest request) {
     return readAuth
@@ -54,7 +54,7 @@ public class CoordinatorController {
         .thenCompose(
             v ->
                 coordinator
-                    .get(tenantId, activeRegion.activeRegionId())
+                    .get(tenantId, regionalScope.regionId())
                     .thenApply(opt -> opt.<Object>map(ReadResponseSanitizer::strip).orElse(null)));
   }
 
@@ -69,7 +69,7 @@ public class CoordinatorController {
       @PathVariable String tenantId,
       @Valid @RequestBody CoordinatorRenewRequest req
   ) {
-    return coordinator.renewIfHolder(tenantId, activeRegion.activeRegionId(), req.token())
+    return coordinator.renewIfHolder(tenantId, regionalScope.regionId(), req.token())
         .thenApply(ok -> Map.of("renewed", ok));
   }
 }

@@ -3,15 +3,11 @@ package com.acme.coordination.grpc;
 import com.acme.coordination.hash.ConsistentHashService;
 import com.acme.coordination.ring.ConsistentHashRing;
 import com.acme.coordination.model.CoordinatorRecord;
-import com.acme.coordination.region.ActiveRegionMonitor;
-import com.acme.coordination.deployment.DeploymentRegistrationPolicy;
-import com.acme.coordination.region.RegionSwitchDrainPolicy;
+import com.acme.coordination.region.RegionalScope;
 import com.acme.coordination.model.JobRecord;
 import com.acme.coordination.model.WorkerRecord;
 import com.acme.coordination.api.error.ParticipantException;
 import com.acme.coordination.etcd.Keyspace;
-import com.acme.coordination.security.SreTokenVerifier;
-import com.acme.coordination.service.ActiveRegionService;
 import com.acme.coordination.service.CoordinatorReadVerificationService;
 import com.acme.coordination.service.CoordinatorService;
 import com.acme.coordination.service.JobLockReadVerificationService;
@@ -24,12 +20,10 @@ import com.acme.coordination.v1.AcquireGlobalCoordinatorRequest;
 import com.acme.coordination.v1.AcquireGlobalJobRequest;
 import com.acme.coordination.v1.AcquireJobRequest;
 import com.acme.coordination.v1.AcquireJobResponse;
-import com.acme.coordination.v1.ActiveRegionInfo;
 import com.acme.coordination.v1.ComputeRangesRequest;
 import com.acme.coordination.v1.ComputeRangesResponse;
 import com.acme.coordination.v1.CoordinationGrpc;
 import com.acme.coordination.v1.CoordinatorPayload;
-import com.acme.coordination.v1.GetActiveRegionRequest;
 import com.acme.coordination.v1.GetCoordinatorRequest;
 import com.acme.coordination.v1.GetCoordinatorResponse;
 import com.acme.coordination.v1.GetGlobalCoordinatorRequest;
@@ -55,7 +49,6 @@ import com.acme.coordination.v1.RenewCoordinatorResponse;
 import com.acme.coordination.v1.RenewGlobalCoordinatorRequest;
 import com.acme.coordination.v1.RingPoint;
 import com.acme.coordination.v1.Ranges;
-import com.acme.coordination.v1.SetActiveRegionRequest;
 import com.acme.coordination.v1.StringMap;
 import com.acme.coordination.v1.TenantKeyWatchEvent;
 import com.acme.coordination.v1.WatchTenantKeysRequest;
@@ -86,11 +79,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   private final CoordinatorReadVerificationService readAuth;
   private final JobLockReadVerificationService jobReadAuth;
   private final ConsistentHashService ring;
-  private final ActiveRegionMonitor activeRegion;
-  private final ActiveRegionService activeRegionService;
-  private final SreTokenVerifier sre;
-  private final RegionSwitchDrainPolicy drainPolicy;
-  private final DeploymentRegistrationPolicy deployment;
+  private final RegionalScope regionalScope;
   private final EtcdWatchService watch;
   private final Keyspace keyspace;
 
@@ -102,11 +91,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
       CoordinatorReadVerificationService readAuth,
       JobLockReadVerificationService jobReadAuth,
       ConsistentHashService ring,
-      ActiveRegionMonitor activeRegion,
-      ActiveRegionService activeRegionService,
-      SreTokenVerifier sre,
-      RegionSwitchDrainPolicy drainPolicy,
-      DeploymentRegistrationPolicy deployment,
+      RegionalScope regionalScope,
       EtcdWatchService watch,
       Keyspace keyspace
   ) {
@@ -117,11 +102,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     this.readAuth = readAuth;
     this.jobReadAuth = jobReadAuth;
     this.ring = ring;
-    this.activeRegion = activeRegion;
-    this.activeRegionService = activeRegionService;
-    this.sre = sre;
-    this.drainPolicy = drainPolicy;
-    this.deployment = deployment;
+    this.regionalScope = regionalScope;
     this.watch = watch;
     this.keyspace = keyspace;
   }
@@ -131,7 +112,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     Map<String, String> md = request.getMetadata().getEntriesMap();
     coordinator.acquire(
             request.getTenantId(),
-            activeRegion.activeRegionId(),
+            regionalScope.regionId(),
             request.getCoordinatorId(),
             request.getInstanceId(),
             request.getTtlSeconds(),
@@ -165,7 +146,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     readAuth
         .verifyRegionalGrpc(request.getTenantId(), CoordinatorReadVerificationService.grpcReadSecret(request.getCoordinatorReadToken()))
         .thenCompose(
-            v -> coordinator.get(request.getTenantId(), activeRegion.activeRegionId()))
+            v -> coordinator.get(request.getTenantId(), regionalScope.regionId()))
         .whenComplete((opt, err) -> {
           if (err != null) {
             responseObserver.onError(toGrpcError(err));
@@ -180,7 +161,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
 
   @Override
   public void renewCoordinator(RenewCoordinatorRequest request, StreamObserver<RenewCoordinatorResponse> responseObserver) {
-    coordinator.renewIfHolder(request.getTenantId(), activeRegion.activeRegionId(), request.getToken())
+    coordinator.renewIfHolder(request.getTenantId(), regionalScope.regionId(), request.getToken())
         .whenComplete((ok, err) -> {
           if (err != null) {
             responseObserver.onError(toGrpcError(err));
@@ -265,7 +246,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     Map<String, String> md = request.getMetadata().getEntriesMap();
     workers.register(
             request.getTenantId(),
-            activeRegion.activeRegionId(),
+            regionalScope.regionId(),
             request.getWorkerId(),
             request.getInstanceId(),
             request.getTtlSeconds(),
@@ -293,7 +274,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
 
   @Override
   public void workerHeartbeat(WorkerHeartbeatRequest request, StreamObserver<WorkerHeartbeatResponse> responseObserver) {
-    workers.heartbeat(request.getTenantId(), activeRegion.activeRegionId(), request.getWorkerId(), request.getToken())
+    workers.heartbeat(request.getTenantId(), regionalScope.regionId(), request.getWorkerId(), request.getToken())
         .whenComplete((ok, err) -> {
           if (err != null) {
             responseObserver.onError(toGrpcError(err));
@@ -308,7 +289,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   public void listWorkers(ListWorkersRequest request, StreamObserver<ListWorkersResponse> responseObserver) {
     readAuth
         .verifyRegionalGrpc(request.getTenantId(), CoordinatorReadVerificationService.grpcReadSecret(request.getCoordinatorReadToken()))
-        .thenCompose(v -> workers.listWorkers(request.getTenantId(), activeRegion.activeRegionId()))
+        .thenCompose(v -> workers.listWorkers(request.getTenantId(), regionalScope.regionId()))
         .whenComplete((list, err) -> {
           if (err != null) {
             responseObserver.onError(toGrpcError(err));
@@ -390,12 +371,12 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     Map<String, String> md = request.getMetadata().getEntriesMap();
     jobParticipants
         .verifyRegional(
-            request.getTenantId(), activeRegion.activeRegionId(), request.getHolder(), request.getParticipantToken())
+            request.getTenantId(), regionalScope.regionId(), request.getHolder(), request.getParticipantToken())
         .thenCompose(
             v ->
                 jobs.acquire(
                     request.getTenantId(),
-                    activeRegion.activeRegionId(),
+                    regionalScope.regionId(),
                     request.getJobId(),
                     request.getHolder(),
                     request.getTtlSeconds(),
@@ -425,7 +406,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   public void releaseJob(ReleaseJobRequest request, StreamObserver<ReleaseJobResponse> responseObserver) {
     jobs.releaseIfCredential(
             request.getTenantId(),
-            activeRegion.activeRegionId(),
+            regionalScope.regionId(),
             request.getJobId(),
             grpcJobToken(request.getToken()),
             grpcJobToken(request.getHolder()))
@@ -443,7 +424,7 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   public void renewJob(RenewJobRequest request, StreamObserver<RenewJobResponse> responseObserver) {
     jobs.renewIfCredential(
             request.getTenantId(),
-            activeRegion.activeRegionId(),
+            regionalScope.regionId(),
             request.getJobId(),
             grpcJobToken(request.getToken()),
             grpcJobToken(request.getHolder()))
@@ -620,55 +601,6 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     } catch (Exception e) {
       responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).withCause(e).asRuntimeException());
     }
-  }
-
-  @Override
-  public void getActiveRegion(GetActiveRegionRequest request, StreamObserver<ActiveRegionInfo> responseObserver) {
-    try {
-      responseObserver.onNext(toActiveRegionInfo());
-      responseObserver.onCompleted();
-    } catch (Exception e) {
-      responseObserver.onError(toGrpcError(e));
-    }
-  }
-
-  @Override
-  public void setActiveRegion(SetActiveRegionRequest request, StreamObserver<ActiveRegionInfo> responseObserver) {
-    try {
-      sre.assertSreFromGrpc(request.getAccessCredential());
-    } catch (Exception e) {
-      responseObserver.onError(toGrpcError(e));
-      return;
-    }
-    activeRegionService
-        .set(request.getRegionId(), request.getStatus())
-        .whenComplete(
-            (state, err) -> {
-              if (err != null) {
-                responseObserver.onError(toGrpcError(err));
-                return;
-              }
-              try {
-                activeRegion.tick();
-                responseObserver.onNext(toActiveRegionInfo());
-                responseObserver.onCompleted();
-              } catch (Exception e) {
-                responseObserver.onError(toGrpcError(e));
-              }
-            });
-  }
-
-  private ActiveRegionInfo toActiveRegionInfo() {
-    var s = activeRegion.snapshot();
-    ActiveRegionInfo.Builder b =
-        ActiveRegionInfo.newBuilder()
-            .setRegionId(activeRegion.instanceHomeRegion())
-            .setActiveRegion(s.regionId())
-            .setSource(s.source() == null ? "" : s.source())
-            .setStatus(deployment.instanceStatusWire())
-            .setRegionalWritesBlocked(drainPolicy.regionalWritesBlocked());
-    drainPolicy.drainingPreviousRegionId().ifPresent(b::setDrainingPreviousRegion);
-    return b.build();
   }
 
   private static RuntimeException toGrpcError(Throwable err) {

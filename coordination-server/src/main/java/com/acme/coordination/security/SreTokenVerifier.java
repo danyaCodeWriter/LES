@@ -8,7 +8,7 @@ import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Component;
 
 /**
- * Статический {@code coordination.sre.stream-listen-token}: SSE workers/jobs/keys и мутации cluster active region.
+ * Статический {@code coordination.sre.stream-listen-token}: SSE workers/jobs/keys без токена лидера coordinator.
  */
 @Component
 public class SreTokenVerifier {

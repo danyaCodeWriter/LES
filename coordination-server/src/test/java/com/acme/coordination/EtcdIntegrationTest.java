@@ -4,7 +4,6 @@ import com.acme.coordination.codec.JsonCodec;
 import com.acme.coordination.config.CoordinationProperties;
 import com.acme.coordination.etcd.Keyspace;
 import com.acme.coordination.idempotency.IdempotencyService;
-import com.acme.coordination.service.ActiveRegionService;
 import com.acme.coordination.service.CoordinatorService;
 import com.acme.coordination.service.JobLockService;
 import com.acme.coordination.service.KvTicketService;
@@ -16,6 +15,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -36,11 +36,10 @@ public class EtcdIntegrationTest {
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
+            "r1",
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre(""),
-            new CoordinationProperties.Limits(0),
-            null);
+            new CoordinationProperties.Limits(0));
     return new TenantKeyQuotaService(client, ks, props);
   }
 
@@ -49,11 +48,10 @@ public class EtcdIntegrationTest {
         new CoordinationProperties(
             CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
             "",
-            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
+            "r1",
             new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
             new CoordinationProperties.Sre(""),
-            new CoordinationProperties.Limits(maxKeys),
-            null);
+            new CoordinationProperties.Limits(maxKeys));
     return new TenantKeyQuotaService(client, ks, props);
   }
 
@@ -73,7 +71,12 @@ public class EtcdIntegrationTest {
             "--initial-cluster-token", "tkn"
         )
         .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(30)));
-    etcd.start();
+    try {
+      etcd.start();
+    } catch (Throwable ex) {
+      Assumptions.assumeTrue(false, "Docker/Testcontainers unavailable: " + ex.getMessage());
+      return;
+    }
     String endpoint = "http://" + etcd.getHost() + ":" + etcd.getMappedPort(2379);
     client = Client.builder().endpoints(endpoint).build();
   }
@@ -238,34 +241,6 @@ public class EtcdIntegrationTest {
         java.util.concurrent.ExecutionException.class, () -> svc.acquire("tquota", REGION, "c1", "p1", 10, Map.of()).get());
   }
 
-  @Test
-  void clusterActiveRegion_roundTripInEtcd() throws Exception {
-    JsonCodec json = new JsonCodec(new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
-    Keyspace ks = new Keyspace("/coord/v1/tenants");
-    Assertions.assertEquals("/coord/v1/cluster/regions/r1/activeRegion", ks.clusterActiveRegionKey("r1"));
-    var props =
-        new CoordinationProperties(
-            CoordinationProperties.Etcd.plain(List.of("http://127.0.0.1:2379"), "/coord/v1/tenants", Duration.ofSeconds(3), Duration.ofSeconds(3)),
-            "",
-            new CoordinationProperties.ActiveRegion("r1", "r1", "ACTIVE", 5000L),
-            new CoordinationProperties.Idempotency(false, 86400, 128, 262_144),
-            new CoordinationProperties.Sre("sre-test-token"),
-            new CoordinationProperties.Limits(0),
-            null);
-    var sre = new com.acme.coordination.security.SreTokenVerifier(props);
-    var home = new com.acme.coordination.region.InstanceHomeRegion(props, event -> {});
-    ActiveRegionService ars = new ActiveRegionService(client, ks, json, sre, home);
-    Assertions.assertTrue(ars.get().get().isEmpty());
-    var state = ars.setWithSre("eu-west", "ACTIVE", "sre-test-token").get();
-    Assertions.assertEquals("eu-west", state.regionId());
-    Assertions.assertEquals("ACTIVE", state.status());
-    Assertions.assertEquals("eu-west", ars.get().get().orElseThrow().regionId());
-    Assertions.assertThrows(
-        java.util.concurrent.ExecutionException.class, () -> ars.setWithSre("x", "ACTIVE", "wrong").get());
-    var standby = ars.setWithSre(null, "STANDBY", "sre-test-token").get();
-    Assertions.assertEquals("eu-west", standby.regionId());
-    Assertions.assertEquals("STANDBY", standby.status());
-  }
 
   @Test
   void idempotencyPayloadRoundTrip() throws Exception {

@@ -2,7 +2,7 @@ package com.acme.coordination.api;
 
 import com.acme.coordination.api.dto.WorkerHeartbeatRequest;
 import com.acme.coordination.api.dto.WorkerRegisterRequest;
-import com.acme.coordination.region.ActiveRegionMonitor;
+import com.acme.coordination.region.RegionalScope;
 import com.acme.coordination.service.CoordinatorReadVerificationService;
 import com.acme.coordination.service.JobLockService;
 import com.acme.coordination.service.WorkerReadVerificationService;
@@ -27,27 +27,27 @@ public class WorkersController {
   private final CoordinatorReadVerificationService readAuth;
   private final WorkerReadVerificationService workerRead;
   private final JobLockService jobs;
-  private final ActiveRegionMonitor activeRegion;
+  private final RegionalScope regionalScope;
 
   public WorkersController(
       WorkerRegistryService workers,
       CoordinatorReadVerificationService readAuth,
       WorkerReadVerificationService workerRead,
       JobLockService jobs,
-      ActiveRegionMonitor activeRegion) {
+      RegionalScope regionalScope) {
     this.workers = workers;
     this.readAuth = readAuth;
     this.workerRead = workerRead;
     this.jobs = jobs;
-    this.activeRegion = activeRegion;
+    this.regionalScope = regionalScope;
   }
 
-  /** Все {@code workerId} в текущем active-region пуле (удобно для {@code POST /v1/rings/assign}). */
+  /** Все {@code workerId} в пуле этого региона (удобно для {@code POST /v1/rings/assign}). */
   @GetMapping("/ids")
   public CompletableFuture<List<String>> listIds(@PathVariable String tenantId, ServerHttpRequest request) {
     return readAuth
         .verifyRegional(request, tenantId)
-        .thenCompose(v -> workers.listWorkerIds(tenantId, activeRegion.activeRegionId()));
+        .thenCompose(v -> workers.listWorkerIds(tenantId, regionalScope.regionId()));
   }
 
   @GetMapping("/{workerId}/jobs")
@@ -57,11 +57,11 @@ public class WorkersController {
       ServerHttpRequest request
   ) {
     return workerRead
-        .verifyRegional(request, tenantId, activeRegion.activeRegionId(), workerId)
+        .verifyRegional(request, tenantId, regionalScope.regionId(), workerId)
         .thenCompose(
             v ->
                 jobs
-                    .listJobsForHolder(tenantId, activeRegion.activeRegionId(), workerId)
+                    .listJobsForHolder(tenantId, regionalScope.regionId(), workerId)
                     .thenApply(list -> list.stream().map(ReadResponseSanitizer::strip).toList()));
   }
 
@@ -72,7 +72,7 @@ public class WorkersController {
   ) {
     Map<String, String> md = req.metadata() != null ? req.metadata() : Map.of();
     return workers
-        .register(tenantId, activeRegion.activeRegionId(), req.workerId(), req.instanceId(), req.ttlSeconds(), md)
+        .register(tenantId, regionalScope.regionId(), req.workerId(), req.instanceId(), req.ttlSeconds(), md)
         .thenApply(ApiConflicts::requireNewWorker);
   }
 
@@ -82,7 +82,7 @@ public class WorkersController {
       @PathVariable String workerId,
       @Valid @RequestBody WorkerHeartbeatRequest req
   ) {
-    return workers.heartbeat(tenantId, activeRegion.activeRegionId(), workerId, req.token()).thenApply(ok -> Map.of("ok", ok));
+    return workers.heartbeat(tenantId, regionalScope.regionId(), workerId, req.token()).thenApply(ok -> Map.of("ok", ok));
   }
 
   @PostMapping("/{workerId}/deregister")
@@ -91,7 +91,7 @@ public class WorkersController {
       @PathVariable String workerId,
       @Valid @RequestBody WorkerHeartbeatRequest req
   ) {
-    return workers.deregisterIfTokenMatches(tenantId, activeRegion.activeRegionId(), workerId, req.token())
+    return workers.deregisterIfTokenMatches(tenantId, regionalScope.regionId(), workerId, req.token())
         .thenApply(ok -> Map.of("deleted", ok));
   }
 
@@ -103,7 +103,7 @@ public class WorkersController {
         .thenCompose(
             v ->
                 workers
-                    .listWorkers(tenantId, activeRegion.activeRegionId())
+                    .listWorkers(tenantId, regionalScope.regionId())
                     .thenApply(ReadResponseSanitizer::stripWorkers));
   }
 }
