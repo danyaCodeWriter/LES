@@ -3,14 +3,17 @@ package com.acme.coordination.sdk.les;
 import com.acme.coordination.ring.RingAssignment;
 import com.acme.coordination.sdk.session.ApiScope;
 import com.acme.coordination.sdk.session.CoordinatorLease;
+import com.acme.coordination.sdk.session.JobLease;
+import com.acme.coordination.sdk.session.LeaseNotAcquiredException;
 import com.acme.coordination.sdk.session.LeaseOptions;
 import com.acme.coordination.sdk.session.WorkerSession;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Scoped Les operations for one tenant. */
@@ -29,18 +32,17 @@ public final class LesTenant {
   }
 
   public Scoped global() {
-    return new Scoped(ApiScope.GLOBAL, null);
+    return new Scoped(ApiScope.GLOBAL);
   }
 
   /** Regional short-path on the LES this client talks to ({@code COORDINATION_REGION}). */
   public Scoped regional() {
-    return new Scoped(ApiScope.REGIONAL, client.options().homeRegion());
+    return new Scoped(ApiScope.REGIONAL);
   }
 
   /** Drain a specific regional namespace (stretched etcd — any LES can clear any region). */
   public JsonNode drain(String regionId) throws Exception {
-    String sre = requireSre();
-    return client.rest().drainRegional(tenantId, regionId, sre);
+    return client.rest().drainRegional(tenantId, regionId, requireSre());
   }
 
   public JsonNode drainGlobal() throws Exception {
@@ -59,7 +61,7 @@ public final class LesTenant {
     private final ApiScope scope;
     private Supplier<Boolean> onlyWhen = () -> true;
 
-    Scoped(ApiScope scope, String ignoredRegionHint) {
+    Scoped(ApiScope scope) {
       this.scope = scope;
     }
 
@@ -79,14 +81,7 @@ public final class LesTenant {
 
     public CoordinatorLease becomeLeader(String coordinatorId, String instanceId) throws Exception {
       requireGate();
-      return client
-          .sessions()
-          .holdCoordinator(
-              tenantId,
-              coordinatorId,
-              instanceId,
-              scope,
-              defaultLease());
+      return client.sessions().holdCoordinator(tenantId, coordinatorId, instanceId, scope, defaultLease());
     }
 
     public WorkerSession joinWorker(String workerId) throws Exception {
@@ -96,6 +91,12 @@ public final class LesTenant {
     public WorkerSession joinWorker(String workerId, String instanceId) throws Exception {
       requireGate();
       return client.sessions().holdWorker(tenantId, workerId, instanceId, scope, defaultLease());
+    }
+
+    /** Live worker pool helpers (ids + hash ring) for a held coordinator. */
+    public WorkerPool workers(CoordinatorLease leader) throws Exception {
+      Objects.requireNonNull(leader, "leader");
+      return new WorkerPool(client, tenantId, scope, leader.token());
     }
 
     /** Freestanding exclusive lock. */
@@ -118,6 +119,10 @@ public final class LesTenant {
       return client.rest().assignRing(workerIds, 128);
     }
 
+    public RingAssignment hashRing(List<String> workerIds, int virtualNodes) throws Exception {
+      return client.rest().assignRing(workerIds, virtualNodes);
+    }
+
     private LeaseOptions defaultLease() {
       return LeaseOptions.ofTtlSeconds((int) client.options().defaultTtl().toSeconds());
     }
@@ -135,25 +140,25 @@ public final class LesTenant {
         this.jobId = jobId;
       }
 
-      /** Acquire freestanding lock, run work, release. Empty if 409 / gate closed. */
-      public Optional<Void> tryRun(Runnable work) throws Exception {
-        return tryRun(UUID.randomUUID().toString(), work);
+      /**
+       * Hold freestanding lock with <strong>background renew</strong> until closed.
+       * Prefer for long work; {@link #tryRun} also renews while the runnable runs.
+       */
+      public Optional<JobLease> tryHold() throws Exception {
+        return tryHold(UUID.randomUUID().toString());
       }
 
-      public Optional<Void> tryRun(String holderLabel, Runnable work) throws Exception {
+      public Optional<JobLease> tryHold(String holderLabel) throws Exception {
         if (!isActiveGateOpen()) {
           return Optional.empty();
         }
-        int ttl = (int) client.options().defaultTtl().toSeconds();
-        String idem = UUID.randomUUID().toString();
-        JsonNode acq;
         try {
-          acq =
-              scope == ApiScope.GLOBAL
-                  ? client
-                      .rest()
-                      .acquireJobGlobal(tenantId, jobId, holderLabel, null, ttl, Map.of(), idem)
-                  : client.rest().acquireJob(tenantId, jobId, holderLabel, null, ttl, Map.of(), idem);
+          return Optional.of(
+              client
+                  .sessions()
+                  .holdFreestandingJob(tenantId, jobId, holderLabel, scope, defaultLease()));
+        } catch (LeaseNotAcquiredException e) {
+          return Optional.empty();
         } catch (IllegalStateException e) {
           if (e.getMessage() != null
               && (e.getMessage().contains("409") || e.getMessage().contains("JOB_EXISTS"))) {
@@ -161,25 +166,94 @@ public final class LesTenant {
           }
           throw e;
         }
-        if (!acq.path("acquired").asBoolean(true) || !acq.hasNonNull("token")) {
+      }
+
+      /** Acquire with renew, run work, release on exit. Empty if 409 / gate closed. */
+      public Optional<Void> tryRun(Runnable work) throws Exception {
+        return tryRun(UUID.randomUUID().toString(), work);
+      }
+
+      public Optional<Void> tryRun(String holderLabel, Runnable work) throws Exception {
+        Optional<JobLease> held = tryHold(holderLabel);
+        if (held.isEmpty()) {
           return Optional.empty();
         }
-        String token = acq.get("token").asText();
-        try {
+        try (JobLease lease = held.get()) {
           work.run();
-        } finally {
-          try {
-            if (scope == ApiScope.GLOBAL) {
-              client.rest().releaseJobGlobal(tenantId, jobId, token);
-            } else {
-              client.rest().releaseJob(tenantId, jobId, token);
-            }
-          } catch (Exception ignored) {
-            // best-effort release
-          }
         }
         return Optional.of(null);
       }
+    }
+  }
+
+  /** Coordinator-authenticated worker listing + consistent hash. */
+  public static final class WorkerPool {
+    private final LesClient client;
+    private final String tenantId;
+    private final ApiScope scope;
+    private final String coordToken;
+
+    WorkerPool(LesClient client, String tenantId, ApiScope scope, String coordToken) {
+      this.client = client;
+      this.tenantId = tenantId;
+      this.scope = scope;
+      this.coordToken = coordToken;
+    }
+
+    public List<String> ids() throws Exception {
+      JsonNode n =
+          scope == ApiScope.GLOBAL
+              ? client.rest().getWorkerIdsGlobal(tenantId, coordToken)
+              : client.rest().getWorkerIdsActive(tenantId, coordToken);
+      List<String> out = new ArrayList<>();
+      if (n != null && n.isArray()) {
+        n.forEach(el -> out.add(el.asText()));
+      }
+      return out;
+    }
+
+    public RingAssignment hashRing() throws Exception {
+      return client.rest().assignRing(ids(), 128);
+    }
+
+    public RingAssignment hashRing(int virtualNodes) throws Exception {
+      return client.rest().assignRing(ids(), virtualNodes);
+    }
+
+    /**
+     * Poll membership and invoke {@code onChange} when the sorted id list changes.
+     * Returns a closer that stops the poller.
+     */
+    public AutoCloseable onMembershipChanged(Consumer<List<String>> onChange, long pollMillis) {
+      Thread t =
+          new Thread(
+              () -> {
+                List<String> prev = List.of();
+                while (!Thread.currentThread().isInterrupted()) {
+                  try {
+                    List<String> cur = ids();
+                    if (!cur.equals(prev)) {
+                      prev = List.copyOf(cur);
+                      onChange.accept(prev);
+                    }
+                    Thread.sleep(Math.max(200, pollMillis));
+                  } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                  } catch (Exception ignored) {
+                    try {
+                      Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                      Thread.currentThread().interrupt();
+                      return;
+                    }
+                  }
+                }
+              },
+              "les-worker-pool-watch");
+      t.setDaemon(true);
+      t.start();
+      return () -> t.interrupt();
     }
   }
 }

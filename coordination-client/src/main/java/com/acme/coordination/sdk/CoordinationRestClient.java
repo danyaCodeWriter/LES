@@ -33,21 +33,34 @@ public final class CoordinationRestClient implements AutoCloseable {
   private final HttpClient http;
   private final ObjectMapper json;
   private final String baseUrl;
+  private final RestCallPolicy policy;
 
   public CoordinationRestClient(String baseUrl) {
-    this(baseUrl, new ObjectMapper().findAndRegisterModules(), HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(5))
-        .build());
+    this(
+        baseUrl,
+        new ObjectMapper().findAndRegisterModules(),
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(),
+        new RestCallPolicy());
   }
 
   public CoordinationRestClient(String baseUrl, ObjectMapper json, HttpClient http) {
+    this(baseUrl, json, http, new RestCallPolicy());
+  }
+
+  public CoordinationRestClient(
+      String baseUrl, ObjectMapper json, HttpClient http, RestCallPolicy policy) {
     this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl").replaceAll("/$", "");
     this.json = Objects.requireNonNull(json);
     this.http = Objects.requireNonNull(http);
+    this.policy = policy == null ? new RestCallPolicy() : policy;
   }
 
   public String baseUrl() {
     return baseUrl;
+  }
+
+  public RestCallPolicy policy() {
+    return policy;
   }
 
   public JsonNode getCoordinatorActive(String tenantId, String coordinatorReadToken) throws Exception {
@@ -415,27 +428,31 @@ public final class CoordinationRestClient implements AutoCloseable {
 
   private JsonNode postJsonAuthed(String path, Object body, String bearerToken, String idempotencyKey)
       throws Exception {
-    String payload = json.writeValueAsString(body);
-    HttpRequest.Builder rb =
-        HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(30))
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
-    if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-      rb.header("Idempotency-Key", idempotencyKey.trim());
-    }
-    if (bearerToken != null && !bearerToken.isBlank()) {
-      rb.header("Authorization", "Bearer " + bearerToken.trim());
-    }
-    HttpRequest req = rb.build();
-    HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-    if (resp.statusCode() / 100 != 2) {
-      throw new IllegalStateException("POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
-    }
-    if (resp.body() == null || resp.body().isBlank()) {
-      return json.nullNode();
-    }
-    return json.readTree(resp.body());
+    return policy.call(
+        () -> {
+          String payload = json.writeValueAsString(body);
+          HttpRequest.Builder rb =
+              HttpRequest.newBuilder(URI.create(baseUrl + path))
+                  .timeout(Duration.ofSeconds(30))
+                  .header("Content-Type", "application/json")
+                  .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+          if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            rb.header("Idempotency-Key", idempotencyKey.trim());
+          }
+          if (bearerToken != null && !bearerToken.isBlank()) {
+            rb.header("Authorization", "Bearer " + bearerToken.trim());
+          }
+          HttpResponse<String> resp =
+              http.send(rb.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+          if (resp.statusCode() / 100 != 2) {
+            throw new IllegalStateException(
+                "POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
+          }
+          if (resp.body() == null || resp.body().isBlank()) {
+            return json.nullNode();
+          }
+          return json.readTree(resp.body());
+        });
   }
 
   /**
