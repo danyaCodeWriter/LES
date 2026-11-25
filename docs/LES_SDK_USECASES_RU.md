@@ -109,11 +109,24 @@ les.tenant("billing").regional().lock("batch-x").tryHold().ifPresent(lease -> {
 });
 ```
 
-### A2. JobQ — подробный пример со таблицей платежей
+### A2. JobQ — кто coordinator, кто worker (важно)
 
-**Идея:** один под становится **coordinator** (уникальная роль claimer), остальные — **workers**. Claimer **проставляет** в вашей таблице колонку `worker_id`. Workers читают только «свои» строки.
+В JobQ участвуют **две роли**. Их путают чаще всего.
 
-Пример таблицы `payment` до stamp:
+| Роль | Что делает под | Вызов SDK | Что SDK прячет |
+|------|----------------|-----------|----------------|
+| **Coordinator (claimer)** | Ровно **один** победитель штампует `worker_id` в вашей таблице | `becomeLeader("queue-claimer")` | **background renew** лидера |
+| **Worker** | Каждый processing-под регистрируется и обрабатывает «свои» строки | `joinWorker(podId)` | **heartbeat renew** |
+
+**Как выбирается claimer:** *каждый* claimer-под (или каждый под, у которого запущен claimer-loop) вызывает `becomeLeader` — это **гонка**. Победитель получает lease и штампует; остальные получают отказ / ждут, пока лидер жив. Вам не нужно вручную продлевать токен: renew крутится в фоне, пока `CoordinatorLease` не закрыт.
+
+**Workers:** *каждый* worker-под вызывает `joinWorker` со своим id (обычно `HOSTNAME`). Пока сессия открыта, heartbeat идёт в фоне — иначе claimer не увидит под в `workers(leader).ids()` / `hashRing()`.
+
+**Один JVM может делать оба loop’а** (claimer + worker в разных потоках). Обычно удобнее **разделить**: Deployment/роль «claimer» vs «worker», или два цикла в одном поде с разными обязанностями. Не смешивайте «я и лидер, и сразу думаю, что все поды — лидеры» — лидер один на имя роли.
+
+#### Таблица `payment` до / после stamp
+
+До (строки ничьи):
 
 | id | amount | worker_id |
 |----|--------|-----------|
@@ -123,9 +136,7 @@ les.tenant("billing").regional().lock("batch-x").tryHold().ifPresent(lease -> {
 | 4  | 20     | *null*    |
 | 5  | 200    | *null*    |
 
-Живые workers в LES: `w-a`, `w-b` (два пода).
-
-Coordinator раздаёт (round-robin или через `hashRing().workerFor(id)`):
+Живые workers в LES: `w-a`, `w-b`. Победивший claimer раздаёт:
 
 | id | amount | worker_id |
 |----|--------|-----------|
@@ -135,31 +146,61 @@ Coordinator раздаёт (round-robin или через `hashRing().workerFor(
 | 4  | 20     | **w-b**   |
 | 5  | 200    | **w-a**   |
 
+#### End-to-end: два отдельных loop’а
+
 ```java
 String podId = System.getenv().getOrDefault("HOSTNAME", "w-a");
+var scoped = les.tenant("payments").regional();
 
-// --- каждый worker-под ---
-try (var me = les.tenant("payments").regional().joinWorker(podId)) {
-  // Только свои строки:
-  // SELECT * FROM payment WHERE worker_id = :me AND status = 'NEW'
-  db.processWhereWorker(me.workerId());
+// ============================================================
+// LOOP 1 — COORDINATOR / CLAIMER (часто отдельный Deployment
+// или отдельный поток). Запускайте на КАЖДОМ claimer-поде:
+// все зовут becomeLeader → победитель один → только он штампует.
+// ============================================================
+void runClaimerLoop() throws Exception {
+  // Гонка за уникальную роль "queue-claimer".
+  // SDK сам renew’ит lease в background, пока leader не закрыт.
+  try (var leader = scoped.becomeLeader("queue-claimer")) {
+    // Сюда попал только победитель. Остальные поды сюда не входят
+    // (или ждут/ретраят — по вашей политике обёртки).
+    while (!Thread.currentThread().isInterrupted()) {
+      var pool = scoped.workers(leader);       // нужен token лидера
+      RingAssignment ring = pool.hashRing(); // живые worker id из LES
+
+      for (Payment p : db.findUnassigned()) {
+        String owner = ring.workerFor(p.id());
+        // UPDATE payment SET worker_id = :owner
+        //  WHERE id = :id AND worker_id IS NULL
+        db.stampWorker(p.id(), owner);
+      }
+      Thread.sleep(500); // свой poll; renew лидера — не здесь, а в SDK
+    }
+  } // close() → stop renew; другой под сможет стать claimer’ом
 }
 
-// --- ровно один claimer (уникальная роль coordinator) ---
-try (var leader = les.tenant("payments").regional().becomeLeader("queue-claimer")) {
-  var pool = les.tenant("payments").regional().workers(leader);
-  RingAssignment ring = pool.hashRing(); // или pool.ids() + свой round-robin
-
-  // Нештампованные платежи:
-  for (Payment p : db.findUnassigned()) {
-    String owner = ring.workerFor(p.id()); // стабильная раздача по id
-    db.stampWorker(p.id(), owner);
-    // UPDATE payment SET worker_id = :owner WHERE id = :id AND worker_id IS NULL
-  }
+// ============================================================
+// LOOP 2 — WORKER (каждый processing-под). Не becomeLeader.
+// joinWorker + heartbeat в фоне; читаем только свои строки.
+// ============================================================
+void runWorkerLoop() throws Exception {
+  // Регистрация worker’а. SDK сам шлёт heartbeat renew в background.
+  try (var me = scoped.joinWorker(podId)) {
+    while (!Thread.currentThread().isInterrupted()) {
+      // SELECT * FROM payment
+      //  WHERE worker_id = :me AND status = 'NEW'
+      db.processWhereWorker(me.workerId());
+      Thread.sleep(200);
+    }
+  } // close() → deregister; claimer перестанет раздавать на этот id
 }
+
+// Типично в main пода:
+//   if (role.equals("claimer")) runClaimerLoop();
+//   else runWorkerLoop();
+// Или оба потока в одном JVM — но это ДВА loop’а, не один смешанный блок.
 ```
 
-**Почему так:** LES не хранит вашу очередь и не делает `SELECT FOR UPDATE` по каждой строке. Он даёт **уникального claimer’а** и **живой список workers**; stamp и обработка — в **вашей** БД. Это и есть «JobQ squaring»: один пишет раздачу, много читают свою долю → **parallel execution**.
+**Почему так:** LES не хранит вашу очередь и не делает `SELECT FOR UPDATE` по строкам. Он даёт **одного claimer’а** (гонка `becomeLeader`) и **живой список workers** (`joinWorker`); stamp и обработка — в **вашей** БД → parallel execution.
 
 ---
 
@@ -323,11 +364,20 @@ les.tenant("billing").global()
 
 ### C2. GLOBAL JobQ
 
+Те же **два loop’а**, что в A2, но контур `.global()`: claimer-поды гоняются за `becomeLeader("queue-claimer")` и штампуют; worker-поды только `joinWorker` + `WHERE worker_id = me`. Не склеивайте обе роли в один `try` без комментариев — см. end-to-end в A2.
+
 ```java
-try (var leader = les.tenant("payments").global().becomeLeader("queue-claimer");
-     var w = les.tenant("payments").global().joinWorker(podId)) {
-  var pool = les.tenant("payments").global().workers(leader);
+var g = les.tenant("payments").global();
+
+// Claimer loop (гонка; победитель штампует):
+try (var leader = g.becomeLeader("queue-claimer")) {
+  var pool = g.workers(leader);
   db.stamp(row -> pool.hashRing().workerFor(row.id()));
+}
+
+// Worker loop (отдельный под / поток):
+try (var me = g.joinWorker(podId)) {
+  db.processWhereWorker(me.workerId());
 }
 ```
 
@@ -388,9 +438,9 @@ try (var leader = les.tenant("payments").regional().becomeLeader("balancer");
 
 ## 2) JobQ stamp `worker_id` (разбор очереди)
 
-См. подробный пример **A2**: coordinator штампует таблицу, workers делают `WHERE worker_id = me`. Классика для платежей, писем, outbox.
+См. **A2** (таблица ролей + два loop’а): *все* claimer-поды зовут `becomeLeader` (гонка, renew в SDK); *все* worker-поды зовут `joinWorker` (heartbeat в SDK); штампует только победитель; workers читают `WHERE worker_id = me`.
 
-Плюс: явное назначение в БД, просто отлаживать. Минус: нужен живой claimer.
+Плюс: явное назначение в БД. Минус: нужен живой claimer.
 
 ## 3) Batch locks + **dynamic metadata** на job
 
