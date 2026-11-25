@@ -107,9 +107,12 @@ implementation(project(":coordination-client"))
 Пакет `com.acme.coordination.sdk.les`: `LesClient.connect(url).sreToken(...).viaRss(rssUrl, recoveryGroup).drainTenant(t).build()`.
 
 - Freestanding lock: `les.tenant(t).global().lock("job").tryRun(() -> …)` (без worker).
-- JobQ: `becomeLeader` / `joinWorker` / `hashRing`.
+- JobQ: `becomeLeader` / `joinWorker` / `workers(leader).hashRing()`.
 - Drain после RSS flip: client-only `viaRss` + `drainTenant` (сервер LES **не** знает RSS).
-- `flags()` / OpsWatch / `MonitoringSse` — см. `scripts/samples/les-client-sketch.md`.
+- `flags()` / OpsWatch / `MonitoringSse` — см. sketch и playbook ниже.
+
+Playbook путей миграции A/B/C + примеры SDK: **[`docs/LES_SDK_USECASES_RU.md`](docs/LES_SDK_USECASES_RU.md)**.  
+Короткий sketch: [`scripts/samples/les-client-sketch.md`](scripts/samples/les-client-sketch.md).
 
 **Freestanding job на сервере:** `participantToken` опционален. **Drain:** `POST /v1/tenants/{t}/regions/{regionId}:drain` (Bearer SRE token).
 
@@ -246,6 +249,7 @@ docker compose --profile with-etcd up -d --build coordination-with-etcd
 
 - Пошаговый сценарий: [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md)
 - Обзор платформы: [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md)
+- Пути миграции + LesClient SDK: [`docs/LES_SDK_USECASES_RU.md`](docs/LES_SDK_USECASES_RU.md)
 - Env: [`docs/ENV_VARIABLES_RU.md`](docs/ENV_VARIABLES_RU.md)
 - [`scripts/demo-two-dc.sh`](scripts/demo-two-dc.sh) — `./scripts/demo-two-dc.sh help`. Из корня: `run-active` / `run-standby` (JDK **21+**, `./gradlew :coordination-server:bootRun`); фон: `start-active-bg` / `start-standby-bg`, стоп: `stop-apps`.
 
@@ -265,7 +269,9 @@ LES — **leader election**: coordinator / workers / jobs (regional + global). *
 2. Для работы только в этом ЦОД — **regional** API; для exclusivity на оба сайта — **`/global/...`**.
 3. После смены «активного» сайта на клиенте — заново register/acquire на нужном LES / контуре.
 
-Подробнее: [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md). Демо: [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md).
+Подробнее: [`docs/PLATFORM_OVERVIEW_RU.md`](docs/PLATFORM_OVERVIEW_RU.md).  
+Пути A/B/C и Java SDK: [`docs/LES_SDK_USECASES_RU.md`](docs/LES_SDK_USECASES_RU.md).  
+Демо: [`docs/DEMO_PLAN_RU.md`](docs/DEMO_PLAN_RU.md).
 
 ## Поверхность API: regional и global
 
