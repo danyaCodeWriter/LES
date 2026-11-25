@@ -44,8 +44,12 @@ public class JobsController {
       @Valid @RequestBody JobAcquireRequest req
   ) {
     Map<String, String> md = req.metadata() != null ? req.metadata() : Map.of();
-    return jobParticipants
-        .verifyRegional(tenantId, regionalScope.regionId(), req.holder(), req.participantToken())
+    CompletableFuture<Void> gate =
+        req.hasParticipant()
+            ? jobParticipants.verifyRegional(
+                tenantId, regionalScope.regionId(), req.holder(), req.participantToken())
+            : CompletableFuture.completedFuture(null);
+    return gate
         .thenCompose(
             v ->
                 jobs.acquire(tenantId, regionalScope.regionId(), jobId, req.holder(), req.ttlSeconds(), md))

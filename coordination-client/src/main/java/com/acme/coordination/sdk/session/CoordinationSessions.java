@@ -117,6 +117,16 @@ public final class CoordinationSessions implements AutoCloseable {
     return holdJob(tenantId, jobId, holder, participantToken, Map.of(), scope, options, true);
   }
 
+  /**
+   * Freestanding job lock (no worker/coordinator participant) with background renew.
+   * Prefer this for long-running exclusive work.
+   */
+  public JobLease holdFreestandingJob(
+      String tenantId, String jobId, String holderLabel, ApiScope scope, LeaseOptions options)
+      throws Exception {
+    return holdJob(tenantId, jobId, holderLabel, null, Map.of(), scope, options, true);
+  }
+
   public JobLease holdJob(
       String tenantId,
       String jobId,

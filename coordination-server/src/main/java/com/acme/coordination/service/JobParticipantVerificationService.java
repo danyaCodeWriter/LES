@@ -7,9 +7,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
- * Job acquire: {@code holder} must be the active regional/global coordinator id with matching coordinator token, or a
- * registered worker id with matching worker registration token. The token is required so knowledge of an id alone is
- * not sufficient to take locks.
+ * Job acquire (strict mode): {@code holder} must be the active regional/global coordinator id with matching
+ * coordinator token, or a registered worker id with matching worker registration token.
+ *
+ * <p>When {@code participantToken} is blank, controllers skip this service — <strong>freestanding</strong> acquire
+ * (holder is a client label only; ownership is the job token).
  */
 @Service
 public class JobParticipantVerificationService {

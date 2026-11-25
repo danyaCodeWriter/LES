@@ -33,17 +33,34 @@ public final class CoordinationRestClient implements AutoCloseable {
   private final HttpClient http;
   private final ObjectMapper json;
   private final String baseUrl;
+  private final RestCallPolicy policy;
 
   public CoordinationRestClient(String baseUrl) {
-    this(baseUrl, new ObjectMapper().findAndRegisterModules(), HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(5))
-        .build());
+    this(
+        baseUrl,
+        new ObjectMapper().findAndRegisterModules(),
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(),
+        new RestCallPolicy());
   }
 
   public CoordinationRestClient(String baseUrl, ObjectMapper json, HttpClient http) {
+    this(baseUrl, json, http, new RestCallPolicy());
+  }
+
+  public CoordinationRestClient(
+      String baseUrl, ObjectMapper json, HttpClient http, RestCallPolicy policy) {
     this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl").replaceAll("/$", "");
     this.json = Objects.requireNonNull(json);
     this.http = Objects.requireNonNull(http);
+    this.policy = policy == null ? new RestCallPolicy() : policy;
+  }
+
+  public String baseUrl() {
+    return baseUrl;
+  }
+
+  public RestCallPolicy policy() {
+    return policy;
   }
 
   public JsonNode getCoordinatorActive(String tenantId, String coordinatorReadToken) throws Exception {
@@ -188,10 +205,19 @@ public final class CoordinationRestClient implements AutoCloseable {
   ) throws Exception {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("holder", holder);
-    body.put("participantToken", participantToken);
+    if (participantToken != null && !participantToken.isBlank()) {
+      body.put("participantToken", participantToken);
+    }
     body.put("ttlSeconds", ttlSeconds);
     body.put("metadata", metadata == null ? Map.of() : metadata);
     return postJson("/v1/tenants/" + tenantId + "/jobs/" + urlPathSegment(jobId) + ":acquire", body, null);
+  }
+
+  /** Freestanding job lock (no worker/coordinator participant). */
+  public JsonNode acquireJobFreestanding(
+      String tenantId, String jobId, String holderLabel, int ttlSeconds, Map<String, String> metadata)
+      throws Exception {
+    return acquireJob(tenantId, jobId, holderLabel, null, ttlSeconds, metadata);
   }
 
   public JsonNode acquireJob(
@@ -205,7 +231,9 @@ public final class CoordinationRestClient implements AutoCloseable {
   ) throws Exception {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("holder", holder);
-    body.put("participantToken", participantToken);
+    if (participantToken != null && !participantToken.isBlank()) {
+      body.put("participantToken", participantToken);
+    }
     body.put("ttlSeconds", ttlSeconds);
     body.put("metadata", metadata == null ? Map.of() : metadata);
     return postJson("/v1/tenants/" + tenantId + "/jobs/" + urlPathSegment(jobId) + ":acquire", body, idempotencyKey);
@@ -247,10 +275,38 @@ public final class CoordinationRestClient implements AutoCloseable {
   ) throws Exception {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("holder", holder);
-    body.put("participantToken", participantToken);
+    if (participantToken != null && !participantToken.isBlank()) {
+      body.put("participantToken", participantToken);
+    }
     body.put("ttlSeconds", ttlSeconds);
     body.put("metadata", metadata == null ? Map.of() : metadata);
     return postJson("/v1/tenants/" + tenantId + "/global/jobs/" + urlPathSegment(jobId) + ":acquire", body, null);
+  }
+
+  public JsonNode acquireJobGlobalFreestanding(
+      String tenantId, String jobId, String holderLabel, int ttlSeconds, Map<String, String> metadata)
+      throws Exception {
+    return acquireJobGlobal(tenantId, jobId, holderLabel, null, ttlSeconds, metadata);
+  }
+
+  public JsonNode releaseCoordinator(String tenantId, String token) throws Exception {
+    return postJson("/v1/tenants/" + tenantId + "/coordinator/release", Map.of("token", token));
+  }
+
+  public JsonNode releaseCoordinatorGlobal(String tenantId, String token) throws Exception {
+    return postJson("/v1/tenants/" + tenantId + "/global/coordinator/release", Map.of("token", token));
+  }
+
+  /** SRE-token drain of a regional namespace (after RSS flip). */
+  public JsonNode drainRegional(String tenantId, String regionId, String sreToken) throws Exception {
+    return postJsonAuthed(
+        "/v1/tenants/" + tenantId + "/regions/" + urlPathSegment(regionId) + ":drain",
+        Map.of(),
+        sreToken);
+  }
+
+  public JsonNode drainGlobal(String tenantId, String sreToken) throws Exception {
+    return postJsonAuthed("/v1/tenants/" + tenantId + "/global:drain", Map.of(), sreToken);
   }
 
   public JsonNode acquireJobGlobal(
@@ -264,7 +320,9 @@ public final class CoordinationRestClient implements AutoCloseable {
   ) throws Exception {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("holder", holder);
-    body.put("participantToken", participantToken);
+    if (participantToken != null && !participantToken.isBlank()) {
+      body.put("participantToken", participantToken);
+    }
     body.put("ttlSeconds", ttlSeconds);
     body.put("metadata", metadata == null ? Map.of() : metadata);
     return postJson("/v1/tenants/" + tenantId + "/global/jobs/" + urlPathSegment(jobId) + ":acquire", body, idempotencyKey);
@@ -361,21 +419,40 @@ public final class CoordinationRestClient implements AutoCloseable {
   }
 
   private JsonNode postJson(String path, Object body, String idempotencyKey) throws Exception {
-    String payload = json.writeValueAsString(body);
-    HttpRequest.Builder rb =
-        HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(30))
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
-    if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-      rb.header("Idempotency-Key", idempotencyKey.trim());
-    }
-    HttpRequest req = rb.build();
-    HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-    if (resp.statusCode() / 100 != 2) {
-      throw new IllegalStateException("POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
-    }
-    return json.readTree(resp.body());
+    return postJsonAuthed(path, body, null, idempotencyKey);
+  }
+
+  private JsonNode postJsonAuthed(String path, Object body, String bearerToken) throws Exception {
+    return postJsonAuthed(path, body, bearerToken, null);
+  }
+
+  private JsonNode postJsonAuthed(String path, Object body, String bearerToken, String idempotencyKey)
+      throws Exception {
+    return policy.call(
+        () -> {
+          String payload = json.writeValueAsString(body);
+          HttpRequest.Builder rb =
+              HttpRequest.newBuilder(URI.create(baseUrl + path))
+                  .timeout(Duration.ofSeconds(30))
+                  .header("Content-Type", "application/json")
+                  .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+          if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            rb.header("Idempotency-Key", idempotencyKey.trim());
+          }
+          if (bearerToken != null && !bearerToken.isBlank()) {
+            rb.header("Authorization", "Bearer " + bearerToken.trim());
+          }
+          HttpResponse<String> resp =
+              http.send(rb.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+          if (resp.statusCode() / 100 != 2) {
+            throw new IllegalStateException(
+                "POST " + path + " failed: HTTP " + resp.statusCode() + " body=" + resp.body());
+          }
+          if (resp.body() == null || resp.body().isBlank()) {
+            return json.nullNode();
+          }
+          return json.readTree(resp.body());
+        });
   }
 
   /**

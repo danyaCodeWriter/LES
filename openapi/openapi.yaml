@@ -7,6 +7,8 @@ info:
     `regionId` в URL; etcd-сегмент = `coordination.region` / `COORDINATION_REGION` этого LES)
     и **global** (`/v1/tenants/{tenant}/global/...`). Кто считается «активным» регионом — решение **клиента**;
     LES только обслуживает lease (coordinator / workers / jobs) и не хранит master-data active region / RSS / status.
+    **Freestanding job:** `participantToken` optional — omit for lock without worker/coordinator.
+    **Drain:** `POST .../regions/{regionId}:drain` (SRE token) force-clears regional leases; client triggers after RSS flip.
 
     Динамическая спецификация: springdoc `/v3/api-docs`, UI `/swagger-ui.html`.
     gRPC: `proto/coordination/v1/coordination.proto` (regional + global lease RPCs; без Get/SetActiveRegion).
@@ -840,4 +842,95 @@ paths:
             text/event-stream:
               schema:
                 type: string
+
+  /v1/tenants/{tenantId}/regions/{regionId}:drain:
+    post:
+      tags: [Regional]
+      summary: Drain regional namespace (force-clear leader/workers/jobs; keep epoch)
+      operationId: drainRegional
+      description: |
+        Auth: SRE `coordination.sre.stream-listen-token`. Les server does not call RSS —
+        clients invoke this after an active-region flip.
+      parameters:
+        - $ref: "#/components/parameters/tenantId"
+        - name: regionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Drain report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string }
+                  scope: { type: string }
+                  deletedCount: { type: integer }
+                  deletedKeys:
+                    type: array
+                    items: { type: string }
+
+  /v1/tenants/{tenantId}/global:drain:
+    post:
+      tags: [Global]
+      summary: Drain global leases (leader/workers/jobs; keep epoch and KV)
+      operationId: drainGlobal
+      parameters:
+        - $ref: "#/components/parameters/tenantId"
+      responses:
+        "200":
+          description: Drain report
+
+  /v1/tenants/{tenantId}/coordinator/release:
+    post:
+      tags: [Regional]
+      summary: Release regional coordinator (token from acquire)
+      operationId: releaseCoordinatorActive
+      parameters:
+        - $ref: "#/components/parameters/tenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  released: { type: boolean }
+
+  /v1/tenants/{tenantId}/global/coordinator/release:
+    post:
+      tags: [Global]
+      summary: Release global coordinator
+      operationId: releaseCoordinatorGlobal
+      parameters:
+        - $ref: "#/components/parameters/tenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  released: { type: boolean }
 

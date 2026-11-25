@@ -167,12 +167,12 @@ message AcquireJobRequest {
   string tenant_id = 1;
   reserved 2;
   string job_id = 3;
-  // Regional coordinatorId (current leader) or registered workerId in this configured region.
+  // Freestanding: any client label. Strict mode: regional coordinatorId or registered workerId.
   string holder = 4;
   // etcd lease TTL seconds; must be 10..300 inclusive.
   int32 ttl_seconds = 5;
   StringMap metadata = 6;
-  // Token from coordinator acquire or worker register (same possession model as renew).
+  // Optional. When empty: freestanding job lock. When set: must match coordinator/worker token.
   string participant_token = 7;
 }
 
@@ -240,12 +240,47 @@ message GetJobResponse {
 message AcquireGlobalJobRequest {
   string tenant_id = 1;
   string job_id = 2;
-  // Global coordinatorId (current global leader) or registered global workerId.
+  // Freestanding label or global coordinator/worker id when participant_token set.
   string holder = 3;
   // etcd lease TTL seconds; must be 10..300 inclusive.
   int32 ttl_seconds = 4;
   StringMap metadata = 5;
+  // Optional; empty = freestanding.
   string participant_token = 6;
+}
+
+message ReleaseCoordinatorRequest {
+  string tenant_id = 1;
+  reserved 2;
+  string token = 3;
+}
+
+message ReleaseCoordinatorResponse {
+  bool released = 1;
+}
+
+message ReleaseGlobalCoordinatorRequest {
+  string tenant_id = 1;
+  string token = 2;
+}
+
+message DrainRegionalRequest {
+  string tenant_id = 1;
+  string region_id = 2;
+  // SRE stream-listen token (same as WatchTenantKeys access_credential).
+  string access_credential = 3;
+}
+
+message DrainGlobalRequest {
+  string tenant_id = 1;
+  string access_credential = 2;
+}
+
+message DrainResponse {
+  string tenant_id = 1;
+  string scope = 2;
+  int32 deleted_count = 3;
+  repeated string deleted_keys = 4;
 }
 
 message ReleaseGlobalJobRequest {
@@ -320,10 +355,12 @@ service Coordination {
   rpc AcquireCoordinator(AcquireCoordinatorRequest) returns (AcquireCoordinatorResponse);
   rpc GetCoordinator(GetCoordinatorRequest) returns (GetCoordinatorResponse);
   rpc RenewCoordinator(RenewCoordinatorRequest) returns (RenewCoordinatorResponse);
+  rpc ReleaseCoordinator(ReleaseCoordinatorRequest) returns (ReleaseCoordinatorResponse);
 
   rpc AcquireGlobalCoordinator(AcquireGlobalCoordinatorRequest) returns (AcquireCoordinatorResponse);
   rpc GetGlobalCoordinator(GetGlobalCoordinatorRequest) returns (GetCoordinatorResponse);
   rpc RenewGlobalCoordinator(RenewGlobalCoordinatorRequest) returns (RenewCoordinatorResponse);
+  rpc ReleaseGlobalCoordinator(ReleaseGlobalCoordinatorRequest) returns (ReleaseCoordinatorResponse);
 
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse);
@@ -347,4 +384,9 @@ service Coordination {
 
   /** Server-streaming watch: all coordination keys under tenant {@code regions/} + {@code global/}. */
   rpc WatchTenantKeys(WatchTenantKeysRequest) returns (stream TenantKeyWatchEvent);
+
+  /** Force-clear regional lease keys (keeps coordinationEpoch). Auth: SRE token. */
+  rpc DrainRegional(DrainRegionalRequest) returns (DrainResponse);
+  /** Force-clear global leader/workers/jobs (keeps epoch + KV tickets). Auth: SRE token. */
+  rpc DrainGlobal(DrainGlobalRequest) returns (DrainResponse);
 }

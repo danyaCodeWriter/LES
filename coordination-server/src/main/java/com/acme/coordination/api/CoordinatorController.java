@@ -72,4 +72,12 @@ public class CoordinatorController {
     return coordinator.renewIfHolder(tenantId, regionalScope.regionId(), req.token())
         .thenApply(ok -> Map.of("renewed", ok));
   }
+
+  @PostMapping("/release")
+  public CompletableFuture<Map<String, Object>> release(
+      @PathVariable String tenantId, @Valid @RequestBody CoordinatorRenewRequest req) {
+    return coordinator
+        .releaseIfHolder(tenantId, regionalScope.regionId(), req.token())
+        .thenApply(ok -> Map.of("released", ok));
+  }
 }

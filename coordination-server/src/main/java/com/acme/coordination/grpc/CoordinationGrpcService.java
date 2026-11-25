@@ -13,6 +13,8 @@ import com.acme.coordination.service.CoordinatorService;
 import com.acme.coordination.service.JobLockReadVerificationService;
 import com.acme.coordination.service.JobLockService;
 import com.acme.coordination.service.JobParticipantVerificationService;
+import com.acme.coordination.security.SreTokenVerifier;
+import com.acme.coordination.service.DrainService;
 import com.acme.coordination.service.WorkerRegistryService;
 import com.acme.coordination.v1.AcquireCoordinatorRequest;
 import com.acme.coordination.v1.AcquireCoordinatorResponse;
@@ -63,6 +65,7 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import net.devh.boot.grpc.server.service.GrpcService;
 import org.springframework.http.HttpStatus;
@@ -82,6 +85,8 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   private final RegionalScope regionalScope;
   private final EtcdWatchService watch;
   private final Keyspace keyspace;
+  private final DrainService drain;
+  private final SreTokenVerifier sre;
 
   public CoordinationGrpcService(
       CoordinatorService coordinator,
@@ -93,7 +98,9 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
       ConsistentHashService ring,
       RegionalScope regionalScope,
       EtcdWatchService watch,
-      Keyspace keyspace
+      Keyspace keyspace,
+      DrainService drain,
+      SreTokenVerifier sre
   ) {
     this.coordinator = coordinator;
     this.workers = workers;
@@ -105,6 +112,8 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
     this.regionalScope = regionalScope;
     this.watch = watch;
     this.keyspace = keyspace;
+    this.drain = drain;
+    this.sre = sre;
   }
 
   @Override
@@ -170,6 +179,24 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
           responseObserver.onNext(RenewCoordinatorResponse.newBuilder().setRenewed(ok).build());
           responseObserver.onCompleted();
         });
+  }
+
+  @Override
+  public void releaseCoordinator(
+      com.acme.coordination.v1.ReleaseCoordinatorRequest request,
+      StreamObserver<com.acme.coordination.v1.ReleaseCoordinatorResponse> responseObserver) {
+    coordinator
+        .releaseIfHolder(request.getTenantId(), regionalScope.regionId(), request.getToken())
+        .whenComplete(
+            (ok, err) -> {
+              if (err != null) {
+                responseObserver.onError(toGrpcError(err));
+                return;
+              }
+              responseObserver.onNext(
+                  com.acme.coordination.v1.ReleaseCoordinatorResponse.newBuilder().setReleased(ok).build());
+              responseObserver.onCompleted();
+            });
   }
 
   @Override
@@ -239,6 +266,72 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
           responseObserver.onNext(RenewCoordinatorResponse.newBuilder().setRenewed(ok).build());
           responseObserver.onCompleted();
         });
+  }
+
+  @Override
+  public void releaseGlobalCoordinator(
+      com.acme.coordination.v1.ReleaseGlobalCoordinatorRequest request,
+      StreamObserver<com.acme.coordination.v1.ReleaseCoordinatorResponse> responseObserver) {
+    coordinator
+        .releaseGlobalIfHolder(request.getTenantId(), request.getToken())
+        .whenComplete(
+            (ok, err) -> {
+              if (err != null) {
+                responseObserver.onError(toGrpcError(err));
+                return;
+              }
+              responseObserver.onNext(
+                  com.acme.coordination.v1.ReleaseCoordinatorResponse.newBuilder().setReleased(ok).build());
+              responseObserver.onCompleted();
+            });
+  }
+
+  @Override
+  public void drainRegional(
+      com.acme.coordination.v1.DrainRegionalRequest request,
+      StreamObserver<com.acme.coordination.v1.DrainResponse> responseObserver) {
+    try {
+      sre.assertSreFromGrpc(request.getAccessCredential());
+    } catch (RuntimeException e) {
+      responseObserver.onError(toGrpcError(e));
+      return;
+    }
+    drain
+        .drainRegional(request.getTenantId(), request.getRegionId())
+        .whenComplete((rep, err) -> completeDrain(responseObserver, rep, err));
+  }
+
+  @Override
+  public void drainGlobal(
+      com.acme.coordination.v1.DrainGlobalRequest request,
+      StreamObserver<com.acme.coordination.v1.DrainResponse> responseObserver) {
+    try {
+      sre.assertSreFromGrpc(request.getAccessCredential());
+    } catch (RuntimeException e) {
+      responseObserver.onError(toGrpcError(e));
+      return;
+    }
+    drain
+        .drainGlobalLeases(request.getTenantId())
+        .whenComplete((rep, err) -> completeDrain(responseObserver, rep, err));
+  }
+
+  private void completeDrain(
+      StreamObserver<com.acme.coordination.v1.DrainResponse> responseObserver,
+      DrainService.DrainReport rep,
+      Throwable err) {
+    if (err != null) {
+      responseObserver.onError(toGrpcError(err));
+      return;
+    }
+    responseObserver.onNext(
+        com.acme.coordination.v1.DrainResponse.newBuilder()
+            .setTenantId(rep.tenantId())
+            .setScope(rep.scope())
+            .setDeletedCount(rep.deletedCount())
+            .addAllDeletedKeys(rep.deletedKeys())
+            .build());
+    responseObserver.onCompleted();
   }
 
   @Override
@@ -369,9 +462,13 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   @Override
   public void acquireJob(AcquireJobRequest request, StreamObserver<AcquireJobResponse> responseObserver) {
     Map<String, String> md = request.getMetadata().getEntriesMap();
-    jobParticipants
-        .verifyRegional(
-            request.getTenantId(), regionalScope.regionId(), request.getHolder(), request.getParticipantToken())
+    String participant = request.getParticipantToken();
+    CompletableFuture<Void> gate =
+        participant == null || participant.isBlank()
+            ? CompletableFuture.completedFuture(null)
+            : jobParticipants.verifyRegional(
+                request.getTenantId(), regionalScope.regionId(), request.getHolder(), participant);
+    gate
         .thenCompose(
             v ->
                 jobs.acquire(
@@ -461,8 +558,12 @@ public class CoordinationGrpcService extends CoordinationGrpc.CoordinationImplBa
   @Override
   public void acquireGlobalJob(AcquireGlobalJobRequest request, StreamObserver<AcquireJobResponse> responseObserver) {
     Map<String, String> md = request.getMetadata().getEntriesMap();
-    jobParticipants
-        .verifyGlobal(request.getTenantId(), request.getHolder(), request.getParticipantToken())
+    String participant = request.getParticipantToken();
+    CompletableFuture<Void> gate =
+        participant == null || participant.isBlank()
+            ? CompletableFuture.completedFuture(null)
+            : jobParticipants.verifyGlobal(request.getTenantId(), request.getHolder(), participant);
+    gate
         .thenCompose(
             v -> jobs.acquireGlobal(request.getTenantId(), request.getJobId(), request.getHolder(), request.getTtlSeconds(), md))
         .whenComplete((res, err) -> {

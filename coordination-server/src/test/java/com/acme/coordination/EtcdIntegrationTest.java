@@ -5,6 +5,7 @@ import com.acme.coordination.config.CoordinationProperties;
 import com.acme.coordination.etcd.Keyspace;
 import com.acme.coordination.idempotency.IdempotencyService;
 import com.acme.coordination.service.CoordinatorService;
+import com.acme.coordination.service.DrainService;
 import com.acme.coordination.service.JobLockService;
 import com.acme.coordination.service.KvTicketService;
 import com.acme.coordination.service.TenantKeyQuotaService;
@@ -241,6 +242,57 @@ public class EtcdIntegrationTest {
         java.util.concurrent.ExecutionException.class, () -> svc.acquire("tquota", REGION, "c1", "p1", 10, Map.of()).get());
   }
 
+
+  @Test
+  void freestandingJobLockWithoutWorker() throws Exception {
+    JsonCodec json = new JsonCodec(new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
+    Keyspace ks = new Keyspace("/coord/v1/tenants");
+    JobLockService jobs = new JobLockService(client, ks, json, testQuota(ks));
+
+    var acq = jobs.acquire("tfree", REGION, "solo-job", "pod-label-1", 10, Map.of("mode", "free")).get();
+    Assertions.assertTrue(acq.acquired());
+    Assertions.assertNotNull(acq.token());
+    Assertions.assertFalse(jobs.acquire("tfree", REGION, "solo-job", "other", 10, Map.of()).get().acquired());
+    Assertions.assertTrue(jobs.renewIfCredential("tfree", REGION, "solo-job", acq.token(), null).get());
+    Assertions.assertTrue(jobs.releaseIfCredential("tfree", REGION, "solo-job", acq.token(), null).get());
+  }
+
+  @Test
+  void drainRegionalClearsLeasesKeepsEpoch() throws Exception {
+    JsonCodec json = new JsonCodec(new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
+    Keyspace ks = new Keyspace("/coord/v1/tenants");
+    CoordinatorService coords = new CoordinatorService(client, ks, json, testQuota(ks));
+    WorkerRegistryService workers = new WorkerRegistryService(client, ks, json, testQuota(ks));
+    JobLockService jobs = new JobLockService(client, ks, json, testQuota(ks));
+    DrainService drain = new DrainService(client, ks);
+
+    var acq = coords.acquire("tdrain", REGION, "c1", "p1", 30, Map.of()).get();
+    Assertions.assertTrue(acq.acquired());
+    long epoch = acq.fenceEpoch();
+    Assertions.assertTrue(workers.register("tdrain", REGION, "w1", "p", 30, Map.of()).get().created());
+    Assertions.assertTrue(jobs.acquire("tdrain", REGION, "j1", "label", 30, Map.of()).get().acquired());
+
+    var report = drain.drainRegional("tdrain", REGION).get();
+    Assertions.assertTrue(report.deletedCount() >= 2);
+    Assertions.assertTrue(coords.get("tdrain", REGION).get().isEmpty());
+    Assertions.assertTrue(workers.listWorkerIds("tdrain", REGION).get().isEmpty());
+
+    var again = coords.acquire("tdrain", REGION, "c2", "p2", 30, Map.of()).get();
+    Assertions.assertTrue(again.acquired());
+    Assertions.assertTrue(again.fenceEpoch() > epoch);
+  }
+
+  @Test
+  void coordinatorRelease() throws Exception {
+    JsonCodec json = new JsonCodec(new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules());
+    Keyspace ks = new Keyspace("/coord/v1/tenants");
+    CoordinatorService svc = new CoordinatorService(client, ks, json, testQuota(ks));
+    var acq = svc.acquire("trel", REGION, "c", "p", 30, Map.of()).get();
+    Assertions.assertTrue(acq.acquired());
+    Assertions.assertTrue(svc.releaseIfHolder("trel", REGION, acq.token()).get());
+    Assertions.assertTrue(svc.get("trel", REGION).get().isEmpty());
+    Assertions.assertTrue(svc.acquire("trel", REGION, "c2", "p2", 30, Map.of()).get().acquired());
+  }
 
   @Test
   void idempotencyPayloadRoundTrip() throws Exception {
